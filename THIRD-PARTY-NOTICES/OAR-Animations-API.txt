@@ -1,0 +1,2 @@
+Open Animation Replacer API header by Ersh. Header explicitly permits modders to copy it into their project.
+https://github.com/ersh1/OpenAnimationReplacer/blob/main/src/API/OpenAnimationReplacerAPI-Animations.h

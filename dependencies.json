@@ -1,0 +1,39 @@
+{
+  "dependencies": [
+    {
+      "path": "vendor/CommonLibSSE-NG",
+      "repository": "https://github.com/alandtse/CommonLibSSE-NG.git",
+      "commit": "94faaed0c60eddd8347767f2d4d29a97c93bde8c",
+      "source_archive": "https://github.com/alandtse/CommonLibSSE-NG/archive/94faaed0c60eddd8347767f2d4d29a97c93bde8c.zip"
+    },
+    {
+      "path": "vendor/DirectXTK",
+      "repository": "https://github.com/microsoft/DirectXTK.git",
+      "commit": "5a8f5d01cc1328e6451b588617c9985fa5a2a8ab",
+      "source_archive": "https://github.com/microsoft/DirectXTK/archive/5a8f5d01cc1328e6451b588617c9985fa5a2a8ab.zip"
+    },
+    {
+      "path": "vendor/minhook",
+      "repository": "https://github.com/TsudaKageyu/minhook.git",
+      "commit": "c3fcafdc10146beb5919319d0683e44e3c30d537",
+      "source_archive": "https://github.com/TsudaKageyu/minhook/archive/c3fcafdc10146beb5919319d0683e44e3c30d537.zip"
+    },
+    {
+      "path": "vendor/spdlog",
+      "repository": "https://github.com/gabime/spdlog.git",
+      "commit": "27cb4c76708608465c413f6d0e6b8d99a4d84302",
+      "source_archive": "https://github.com/gabime/spdlog/archive/27cb4c76708608465c413f6d0e6b8d99a4d84302.zip"
+    },
+    {
+      "path": "vendor/rapidcsv",
+      "repository": "https://github.com/d99kris/rapidcsv.git",
+      "commit": "a98b85e663114b8fdc9c0dc03abf22c296f38241",
+      "source_archive": "https://github.com/d99kris/rapidcsv/archive/a98b85e663114b8fdc9c0dc03abf22c296f38241.zip"
+    }
+  ],
+  "CommonLib_openvr_submodule": {
+    "repository": "https://github.com/ValveSoftware/openvr.git",
+    "commit": "60eb187801956ad277f1cae6680e3a410ee0873b",
+    "needed": "Headers; Wingflight builds SE+AE with VR disabled."
+  }
+}

@@ -1,0 +1,10 @@
+build*/
+private-test-inputs/
+private-audit/
+__pycache__/
+*.pyc
+*.dll
+*.pdb
+*.lib
+*.obj
+*.exe

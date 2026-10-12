@@ -1,0 +1,4 @@
+Optional True Directional Movement interoperability uses the public V2 API.
+Published by ersh with an explicit invitation for modders to copy the API header.
+Wingflight declares only the V1/V2 ABI method layout; no TDM implementation or DLL is bundled.
+https://github.com/ersh1/TrueDirectionalMovement/blob/57b913ae17fed857c9e281799174898cd66a3e82/src/TrueDirectionalMovementAPI.h

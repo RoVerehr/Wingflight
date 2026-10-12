@@ -1,0 +1,10 @@
+Wingflight's optional Mod Control Panel uses the unmodified API header from:
+https://github.com/QTR-Modding/SKSE-Menu-Framework-3-API
+QTR-Modding / SKSE Menu Framework by Thiago and contributors.
+Header commit: 1dcb70179076aae4ab626f43c5baab2735ca5877
+License: GNU Lesser General Public License version 2.1 (LGPL-2.1).
+
+The complete header and license are included in this source repository
+under vendor/SKSE-Menu-Framework-3-API. A copy of the license accompanies the
+binary package. No SKSE Menu Framework DLL is bundled or statically linked;
+install the original framework separately to use the optional settings menu.
