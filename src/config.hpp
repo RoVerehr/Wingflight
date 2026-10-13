@@ -3,6 +3,7 @@
 #include "wing_motion.hpp"
 #include "body_motion.hpp"
 #include "leg_secondary_motion.hpp"
+#include "collision_policy.hpp"
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -31,10 +32,15 @@ struct WingProfile {
     WingTiming timing;
 };
 struct Configuration {
+    impact::Settings collision;
     Tuning tuning;
     HoverTiming hoverTiming;
     BodyTiming bodyTiming;
     float powerStrokeWingPitch{45};
+    float highSpeedFlapHoldSeconds{0.5f};
+    float jumpWingOpenPercent{30};
+    float jumpWingOverOpenPercent{35},jumpWingOpenSeconds{.22f},jumpWingSettleSeconds{.43f};
+    float jumpWingFlutterPeriod{1.6f},jumpWingFlutterAmplitude{1};
     float spreadAmplitudeMultiplier{1};
     bool enabled{true}, logSamples{true}, poseWhenArmed{true},faceFlight{true};
     bool awuCompatibility{true};
@@ -49,6 +55,7 @@ struct Configuration {
     bool armedBanking{true};
     bool highSpeedPitch{true};
     float highSpeedPitchBlendSeconds{0.25f};
+    float movementBlendSeconds{0.75f},sprintBlendInSeconds{0.75f},sprintBlendOutSeconds{0.75f};
     float bankDegrees{20},bankBlendSeconds{0.35f};
     float armedSprintLeanDegrees{60},armedSprintLeanIn{0.75f},armedSprintLeanOut{0.75f};
     float lowerBodyBlendIn{0.30f},lowerBodyBlendOut{0.25f};
@@ -58,5 +65,5 @@ struct Configuration {
     float deadzone{0.2f},glideHoldSeconds{0.25f},jumpHeightMultiplier{2.0f};
     std::vector<WingProfile> profiles;
 };
-Configuration loadConfiguration();
+Configuration loadConfiguration(const std::filesystem::path& source = {});
 }

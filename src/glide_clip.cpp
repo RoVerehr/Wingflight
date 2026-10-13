@@ -2,6 +2,7 @@
 #include "glide_clip_policy.hpp"
 #include "lower_body.hpp"
 #include "armed_sprint_clip.hpp"
+#include "flight_pose.hpp"
 #include "wings.hpp"
 #include "continuous_wing_rate.hpp"
 #include <SKSE/SKSE.h>
@@ -14,6 +15,7 @@ std::atomic_uint samples{};
 struct ClipUpdate {
     static void thunk(RE::hkbClipGenerator* clip,const RE::hkbContext& context,float dt) {
         updateArmedSprintIdle(clip,context);
+        updateFlightPose(clip,context);
         bool selected=false;
         if(context.character) for(auto& character:characters) if(character.load()==context.character){selected=true;break;}
         if(selected && clip && clip->name.c_str() && timedFallClip(clip->name.c_str())
@@ -49,13 +51,13 @@ struct ClipUpdate {
 };
 struct ClipDeactivate {
     static void thunk(RE::hkbClipGenerator* clip,const RE::hkbContext& context){
-        forgetLowerBodyClip(clip);original(clip,context);afterArmedSprintDeactivate(clip,context);
+        forgetLowerBodyClip(clip);original(clip,context);afterArmedSprintDeactivate(clip,context);afterFlightPoseDeactivate(clip,context);
     }
     static inline REL::Relocation<decltype(thunk)> original;
 };
 struct ClipActivate {
     static void thunk(RE::hkbClipGenerator* clip,const RE::hkbContext& context){
-        beforeArmedSprintActivate(clip,context);original(clip,context);afterArmedSprintActivate(clip,context);
+        beforeFlightPoseActivate(clip,context);beforeArmedSprintActivate(clip,context);original(clip,context);afterArmedSprintActivate(clip,context);afterFlightPoseActivate(clip,context);
     }
     static inline REL::Relocation<decltype(thunk)> original;
 };

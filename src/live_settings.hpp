@@ -18,6 +18,14 @@ struct LiveFloatSetting {
 };
 // This is the complete menu allowlist. All other settings remain startup-only.
 inline constexpr auto liveFloatSettings = std::to_array<LiveFloatSetting>({
+    {"Jump","OverOpenPercent","Initial jump wing opening, independently set from 0 to 100. 100 opens fully, then WingSettleSeconds transitions to WingOpenPercent. Set both percentages equal for no return motion.",0,100,[](Configuration& c)->float&{return c.jumpWingOverOpenPercent;}},
+    {"Jump","WingOpenSeconds","Seconds to ease into the jump opening peak; also used to fold on landing.",.05f,3,[](Configuration& c)->float&{return c.jumpWingOpenSeconds;}},
+    {"Jump","WingSettleSeconds","Seconds to transition from OverOpenPercent to WingOpenPercent.",.05f,3,[](Configuration& c)->float&{return c.jumpWingSettleSeconds;}},
+    {"Jump","WingFlutterPeriod","Seconds per jump wing flutter cycle. Smaller is faster; phase continues when adjusted. Uses the same authored spread loop as glide.",.2f,5,[](Configuration& c)->float&{return c.jumpWingFlutterPeriod;}},
+    {"Jump","WingFlutterAmplitude","Jump-only flutter amplitude: 0 = still, 1 = source motion, 2 = double. Independent of SpreadAmplitudeMultiplier. The wing opening pose blend still reduces visible motion at partial opening.",0,2,[](Configuration& c)->float&{return c.jumpWingFlutterAmplitude;}},
+    {"Jump","WingOpenPercent","Settled AWU dragon/feather wing opening during ordinary jumps: 0 = folded, 30 = subtle, 100 = fully spread. OverOpenPercent independently sets the initial opening. Does not change flight/glide, lift or jump height.",0,100,[](Configuration& c)->float&{return c.jumpWingOpenPercent;}},
+    {"Collision","Multiplier","Collision damage scale for the player and contacted actors. 0 disables damage.",0,10,[](Configuration& c)->float&{return c.collision.multiplier;}},
+    {"Collision","MinImpactSpeed","Safe closing speed into a surface, in Havok units. Tangential speed does not count. Base damage = 5 * (closing speed - this value)^2 * Multiplier, then native damage rules apply.",0,100,[](Configuration& c)->float&{return c.collision.minSpeed;}},
     {"Flight","Speed","Ordinary flight speed in Havok velocity units.",0.5f,20,[](Configuration& c)->float&{return c.tuning.speed;}},
     {"Flight","SprintSpeedMultiplier","Multiplier while the actor is actually sprinting; wingbeats add a separate bonus.",1,4,[](Configuration& c)->float&{return c.tuning.sprintSpeedMultiplier;}},
     {"Flight","TurnResponse","Horizontal steering response. Larger values turn faster.",0.1f,60,[](Configuration& c)->float&{return c.tuning.turnResponse;}},
@@ -42,7 +50,7 @@ inline constexpr auto liveFloatSettings = std::to_array<LiveFloatSetting>({
     {"Jump","WingedHeightMultiplier","Multiplier of native ground-jump HEIGHT with supported wings. 1 disables the extra boost; AWU's boost may stack.",1,4,[](Configuration& c)->float&{return c.jumpHeightMultiplier;}},
     {"LowerBody","BlendInSeconds","Seconds to blend flight legs in, including armed relaxation when drawing a weapon.",0.05f,2,[](Configuration& c)->float&{return c.lowerBodyBlendIn;}},
     {"LowerBody","BlendOutSeconds","Seconds to release the flight-leg overlay or armed relaxation when sheathing.",0.05f,2,[](Configuration& c)->float&{return c.lowerBodyBlendOut;}},
-    {"LowerBody","ThighAnimationWeight","Authored thigh animation retained during armed flight: 0 = fixed flight reference, 1 = original thighs.",0,1,[](Configuration& c)->float&{return c.legRelaxation.thighAnimationWeight;}},
+    {"LowerBody","ThighAnimationWeight","Authored thigh animation retained during armed flight: 0 = current flight animation, 1 = original weapon/attack thighs.",0,1,[](Configuration& c)->float&{return c.legRelaxation.thighAnimationWeight;}},
     {"LowerBody","SwingMaxDegrees","Maximum additional calf rotation about the knee hinge, relative to its flight pose. Feet receive a small ankle correction.",0,30,[](Configuration& c)->float&{return c.legRelaxation.maxSwingDegrees;}},
     {"LowerBody","SwingStiffness","Restoring spring strength. Larger values return to the target more firmly/quickly.",1,100,[](Configuration& c)->float&{return c.legRelaxation.stiffness;}},
     {"LowerBody","SwingDamping","Angular damping. Larger values reduce wobble; 0 allows continued oscillation.",0,40,[](Configuration& c)->float&{return c.legRelaxation.damping;}},
@@ -85,6 +93,8 @@ inline void applyLiveSettings(Configuration& current, Configuration candidate, f
     roundLiveSettings(candidate);
     for (const auto& setting : liveFloatSettings) setting.value(current)=setting.value(candidate);
     current.disableSprintWhenArmed=candidate.disableSprintWhenArmed;
+    current.collision.enabled=candidate.collision.enabled;
+    current.collision.damageActors=candidate.collision.damageActors;
     current.legRelaxation.enabled=candidate.legRelaxation.enabled;
     current.legRelaxation.secondaryMotion=candidate.legRelaxation.secondaryMotion;
     current.modeKey=candidate.modeKey;current.landKey=candidate.landKey;current.descendKey=candidate.descendKey;

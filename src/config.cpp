@@ -29,16 +29,18 @@ unsigned long localID(const std::filesystem::path& file,const char* key,const st
     catch(const std::exception& error){throw std::runtime_error(fmt::format("Cannot parse local FormID: file={} key={} value='{}' reason={}",file.string(),key,text,error.what()));}
 }
 }
-Configuration loadConfiguration() {
+Configuration loadConfiguration(const std::filesystem::path& source) {
     Configuration cfg;
     const auto root = std::filesystem::absolute("Data/SKSE/Plugins");
-    const auto file = root / "Wingflight.ini";
+    const auto file = source.empty()?root / "Wingflight.ini":std::filesystem::absolute(source);
     auto integer = [&](const char* section, const char* key, unsigned fallback, unsigned maximum) {
         const float value = number(file, section, key, static_cast<float>(fallback), 0, static_cast<float>(maximum));
         if (std::floor(value) != value) { throw std::runtime_error(fmt::format("Non-integer setting: {}/{} value={}",section,key,value)); }
         return static_cast<unsigned>(value);
     };
     cfg.enabled = integer("General", "Enabled", 1, 1) != 0;
+    cfg.collision.enabled=integer("Collision","Enabled",1,1)!=0;
+    cfg.collision.damageActors=integer("Collision","DamageActors",1,1)!=0;
     cfg.awuCompatibility=integer("Compatibility","AWU",1,1)!=0;
     cfg.glideEnabled=integer("Glide","Enabled",1,1)!=0;
     cfg.logSamples = integer("General", "DiagnosticSamples", 1, 1) != 0;
@@ -77,20 +79,20 @@ Configuration loadConfiguration() {
         }
     }
     auto& body=cfg.bodyTiming;
-    body.enabled=integer("Body","ForwardLean",1,1)!=0;
+    body.enabled=integer("Body","UnarmedFlightPoses",1,1)!=0;
+    cfg.movementBlendSeconds=number(file,"Body","MovementBlendSeconds",0.75f,0.05f,3);
+    cfg.sprintBlendInSeconds=number(file,"Body","SprintBlendInSeconds",0.75f,0.05f,3);
+    cfg.sprintBlendOutSeconds=number(file,"Body","SprintBlendOutSeconds",0.75f,0.05f,3);
     cfg.armedSprintLean=integer("Body","ArmedSprintLean",1,1)!=0;
     cfg.armedSprintAutoAlign=integer("Body","ArmedSprintAutoAlign",1,1)!=0;
     cfg.armedSprintLeanDegrees=number(file,"Body","ArmedSprintLeanDegrees",60,0,90);
     cfg.armedSprintLeanIn=number(file,"Body","ArmedSprintLeanInSeconds",0.75f,0.05f,3);
     cfg.armedSprintLeanOut=number(file,"Body","ArmedSprintLeanOutSeconds",0.75f,0.05f,3);
-    body.enterSpeedRatio=number(file,"Body","LeanEnterSpeedRatio",body.enterSpeedRatio,0.05f,1.0f);
-    body.exitSpeedRatio=number(file,"Body","LeanExitSpeedRatio",body.exitSpeedRatio,0,body.enterSpeedRatio);
-    body.enterDelay=number(file,"Body","LeanEnterDelay",body.enterDelay,0,2);
-    body.exitDelay=number(file,"Body","LeanExitDelay",body.exitDelay,0,2);
     body.glideSpeed=number(file,"Wings","SpreadPlaybackMultiplier",body.glideSpeed,0.25f,4);
     cfg.spreadAmplitudeMultiplier=number(file,"Wings","SpreadAmplitudeMultiplier",1,0,2);
     body.forwardGlideSpeed=number(file,"Wings","FastFlapPlaybackMultiplier",body.forwardGlideSpeed,0.25f,4);
     cfg.powerStrokeWingPitch=number(file,"Wings","HighSpeedPowerStrokeWingPitch",45,0,90);
+    cfg.highSpeedFlapHoldSeconds=number(file,"Wings","HighSpeedFlapHoldSeconds",0.5f,0,5);
     body.banking=integer("Body","Banking",1,1)!=0;
     cfg.armedBanking=integer("Body","ArmedBanking",1,1)!=0 && body.banking;
     cfg.bankDegrees=number(file,"Body","BankDegrees",20,0,45);

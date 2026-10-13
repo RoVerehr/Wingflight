@@ -29,6 +29,7 @@ public:
     void prepareContinuousAnimation(WingMatch match,bool active,bool highSpeed,float fastMultiplier,float dt=0);
     void setFlapRate(float rate);
     bool setBlend(WingMatch match, float flapWeight, float ownership=1,float fast=0) const;
+    bool setJumpPreview(WingMatch match,float amount,float period,float amplitude);
     bool parkInvisibleFlap();
     bool parkInvisibleGlide();
     void updateGlideRate(float multiplier,float spreadMultiplier=1);

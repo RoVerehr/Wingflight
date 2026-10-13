@@ -1,6 +1,8 @@
-# Wingflight
+# Wingflight 0.3.14
 
 Wingflight adds flight with collisions, manual wingbeats and automatic hovering to Skyrim.
+
+Default flight poses use the separately installed Flying Animations - Resource (FAR). Custom poses can be selected through Open Animation Replacer (OAR).
 
 Maintained by ROSVER.
 

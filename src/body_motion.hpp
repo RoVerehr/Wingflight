@@ -4,7 +4,8 @@
 namespace wingflight {
 struct BodyTiming {
     bool enabled{true},banking{true};
-    float enterSpeedRatio{0.35f},exitSpeedRatio{0.20f},enterDelay{0.16f},exitDelay{0.12f};
+    // Internal forward-banking hysteresis, no longer user-facing pose controls.
+    static constexpr float enterSpeedRatio=0.35f,exitSpeedRatio=0.20f,enterDelay=0.16f,exitDelay=0.12f;
     float glideSpeed{1.0f},forwardGlideSpeed{1.2f};
 };
 class BodyMotion {
@@ -22,7 +23,7 @@ public:
         if(fast)type=2;
         // OAR owns only straight/forward poses. Runtime banking is shared with
         // armed flight; selecting an authored bank here would apply it twice.
-        pose_=type*3+1;
+        pose_=type+1;
         const float target=fast?t.forwardGlideSpeed:t.glideSpeed;
         rate_=target+(rate_-target)*std::exp(-6*dt);
     }

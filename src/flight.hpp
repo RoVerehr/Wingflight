@@ -201,6 +201,22 @@ public:
             const float oldSpeed=std::hypot(velocity_.x,velocity_.y);
             const float targetSpeed=std::hypot(targetX,targetY);
             const float heading=std::atan2(targetY,targetX);
+            // Near-opposite requests brake through zero rather than inventing
+            // a lateral U-turn. Keep this decision until the new velocity is
+            // established, or the player changes the requested direction.
+            if(reversing_ && (targetSpeed<=0.001f ||
+                std::abs(std::remainder(heading-reversalHeading_,6.28318530718f))>0.5235987756f))
+                reversing_=false;
+            if(!reversing_ && oldSpeed>0.001f && targetSpeed>0.001f &&
+                (velocity_.x*targetX+velocity_.y*targetY)/(oldSpeed*targetSpeed)<-0.95f){
+                reversing_=true;reversalHeading_=heading;
+            }
+            if(reversing_){
+                velocity_.x=approach(velocity_.x,targetX,t.acceleration,dt);
+                velocity_.y=approach(velocity_.y,targetY,t.acceleration,dt);
+                if(std::hypot(velocity_.x-targetX,velocity_.y-targetY)<=
+                    std::max(0.001f,targetSpeed*0.005f))reversing_=false;
+            }else{
             float angle=heading;
             if (oldSpeed>0.001f) {
                 const float oldHeading=std::atan2(velocity_.y,velocity_.x);
@@ -209,7 +225,9 @@ public:
             }
             const float speed=approach(oldSpeed,targetSpeed,t.acceleration,dt);
             velocity_.x=std::cos(angle)*speed;velocity_.y=std::sin(angle)*speed;
+            }
         } else {
+            reversing_=false;
             velocity_.x=approach(velocity_.x,0,t.drag,dt);
             velocity_.y=approach(velocity_.y,0,t.drag,dt);
         }
@@ -304,7 +322,7 @@ public:
     // hover anchor or inherit the native dash's large temporary velocity.
     bool resumeAfterNativeTravel(float height) {
         if(!active_||!std::isfinite(height))return false;
-        velocity_={};hoverAnchor_=false;hoverIntegral_=0;contact_=0;
+        velocity_={};reversing_=false;hoverAnchor_=false;hoverIntegral_=0;contact_=0;
         autoHover_.reset();autoHover_.observe(height);
         entryFlapPending_=false;return true;
     }
@@ -316,6 +334,8 @@ private:
     bool active_{}, leftGround_{},glideOnly_{},highSpeed_{},continuous_{};
     bool entryFlapPending_{};
     bool controlledDescent_{};
+    bool reversing_{};
+    float reversalHeading_{};
     Mode mode_{Mode::flap};
     Vec3 velocity_{};
     float cooldown_{}, age_{}, contact_{};

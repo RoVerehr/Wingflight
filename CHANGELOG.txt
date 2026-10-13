@@ -1,0 +1,33 @@
+Wingflight 0.3.14
+- Brake near-opposite movement through zero instead of a lateral U-turn.
+- Face the requested forward direction instead of remaining backward momentum.
+- Cover draw/sheath and pose recovery with a continuous flight-leg handoff.
+- Blend from the previously displayed flight legs and defer native thigh retention until recovery.
+- Reuse entry downstrokes only above an estimated 70 percent raised height.
+- Add Wings/HighSpeedFlapHoldSeconds (default 0.50s, range 0..5) and migrate old INIs.
+- Add flight collision damage from native physical contacts, with optional NPC damage.
+- Add live Collision controls and migrate older INIs.
+- End flight on damaging impacts and play the vanilla unarmed/flesh impact sound once.
+- AWU dragon/feather wings open on held Jump outside flight; jumps use a partial preparation pose.
+- Retain native wing transitions and full-flight/provider-specific behavior.
+- Add partial jump wing preparation and retain it through flight/glide entry blending.
+- Use unarmed flesh impact audio and request the player native Hit pain topic.
+- Add a gentle opening overshoot and slow reduced-amplitude motion to jump wings.
+- Preserve preview phase and smoothly restore flutter amplitude on flight/glide entry.
+- Add Jump/WingOpenPercent (0..100, default 30), live in the control panel and retained through INI migration.
+- Expose jump opening overshoot, open/settle time and flutter period/amplitude in INI and the live menu.
+- Jump flutter amplitude no longer multiplies SpreadAmplitudeMultiplier; default amplitude is 1.
+- Replace relative WingOvershootPercent with independent initial OverOpenPercent.
+- Sample armed flight leg motion from the three pose files instead of a frozen reference.
+- Keep RelaxedArmedLegs thigh retention and bounded knee inertia on the moving reference.
+- Log pose weights and native/reference thigh difference for diagnostics.
+- Add native flight-only movement and sprint in/out blend durations.
+- Migrate old INIs to the current template with backups and value validation.
+- Rename ForwardLean to UnarmedFlightPoses; make four Lean controls internal.
+- Keep native idle, walk/run and sprint graph transitions during unarmed flight.
+- Stop forcing unarmed animation speed channels to zero.
+- Map every walk/run direction to Forward Flight without restarting on mode changes.
+- Combine pose configuration into one OAR group with three direct subfolders.
+- Use BodyPose values 1 (Hover), 2 (Movement), 3 (Sprint).
+- Preserve optional local animation priority and direct FAR resource fallback.
+- Retain armed flight, wing providers and integrated SE/AE/GOG support.

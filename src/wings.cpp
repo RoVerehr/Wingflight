@@ -145,6 +145,10 @@ bool Wings::setBlend(WingMatch match,float flap,float ownership,float fast)const
     return const_cast<WingRuntime&>(runtime_).blend(flap,ownership,fast);
 }
 bool Wings::parkInvisibleFlap(){return logicalActive_?logical_.parkPower():nativeActive_?parkVampirePower():runtime_.parkPower();}
+bool Wings::setJumpPreview(WingMatch match,float amount,float period,float amplitude){
+    if(!match.profile||!match.profile->awuCompatibility||match.profile->nativeVampire||match.profile->continuousFlight||match.profile->animationless)return false;
+    return prepareVisual(match).found&&runtime_.preview(amount,period,amplitude);
+}
 bool Wings::parkInvisibleGlide(){return logicalActive_?logical_.parkFast():nativeActive_?parkVampireFast():runtime_.parkFast();}
 void Wings::setFlapRate(float rate){if(logicalActive_)logical_.powerRate(rate);else if(nativeActive_)rateVampireWings(rate);else runtime_.powerRate(rate);}
 void Wings::updateGlideRate(float fast,float spread){if(logicalActive_)logical_.loopRate(fast,spread);else if(nativeActive_)loopRateVampireWings(fast,spread);else runtime_.loopRate(fast,spread);}

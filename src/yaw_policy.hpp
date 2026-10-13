@@ -10,6 +10,11 @@ inline bool wantsFlightFacing(bool enabled,bool fullFlight,float forward,float h
     return enabled&&fullFlight&&forward>0.05f&&horizontal>0.1f
         &&(!armed || (!attacking&&!blocking));
 }
+// Body facing follows the requested direction, not momentum left over from
+// backing up. Forward/right are camera-relative planar input components.
+inline float requestedFlightYaw(float cameraYaw,float right,float forward) {
+    return cameraYaw+std::atan2(right,forward);
+}
 inline float facingYaw(float current,float desired,float dt,float response) {
     if (!std::isfinite(current)||!std::isfinite(desired)||!std::isfinite(dt)||dt<=0) {
         if(!std::isfinite(current)||!std::isfinite(desired)||!std::isfinite(dt)||dt<0)

@@ -11,6 +11,7 @@ public:
     void advance(float delta);
     WingPlayback prepare(WingMatch match);
     bool blend(float flap,float ownership,float fast);
+    bool preview(float amount,float period,float amplitude);
     bool parkPower();
     bool parkFast();
     void powerRate(float rate);

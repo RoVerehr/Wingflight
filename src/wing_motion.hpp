@@ -19,6 +19,8 @@ struct WingMotionFrame {
     float phase{}, duration{3.166667f}, verticalSpeed{};
     float visibleWeight{1},actualRate{1};
     float automaticRecoverySeconds{-1};
+    bool highSpeed{};
+    float highSpeedFlapHoldSeconds{0.5f};
 };
 
 struct HoverTiming {
@@ -63,7 +65,7 @@ public:
         if(interrupted&&!finishDown)stroke_=Stroke::recovery;
         wantFlap_=hasManual();
     }
-    void pulse(bool physical=true,bool fastManual=false,float cost=0) {
+    void pulse(bool physical=true,bool fastManual=false,float cost=0,bool finishCurrentDownstroke=false) {
         urgency_=seenPulse_?std::clamp((0.85f-sincePulse_)/0.55f,0.0f,1.0f):0;
         fastManual_=fastManual&&physical;
         if((hovering_||fastManual_) && physical)urgency_=1;
@@ -72,10 +74,25 @@ public:
         // rewound. Begin the requested fast raising immediately afterwards.
         // During raising, replace the automatic beat in place at the same pose.
         const Beat credit{physical?Credit::manual:Credit::visual,physical?cost:0,!physical,++nextToken_};
-        if(!credits_.empty() && credits_.front().kind!=Credit::manual && !((hovering_||descentGliding_) && physical && stroke_==Stroke::down)){credits_.front()=credit;}
+        if(!credits_.empty() && credits_.front().kind!=Credit::manual && !finishCurrentDownstroke && !((hovering_||descentGliding_) && physical && stroke_==Stroke::down)){credits_.front()=credit;}
         else {credits_.push_back(credit);++pending_;}
         if (!wantFlap_) { entryTime_=0;if(!descentGliding_||credits_.size()==1){stroke_=Stroke::waiting;lastPhase_=-1;} }
         normalTime_=descentTime_=0;wantFlap_=true;
+    }
+    // Phase estimates raised height: top=1, bottom=0 over the power downswing.
+    // Reuse only its upper 30%; a lower visible wing must finish then raise
+    // before the new power stroke. Never seek a visible sequence backwards.
+    bool highSpeedEntryPulse(float phase,float visibleWeight,const WingTiming& timing,float cost=0) {
+        const bool down=std::isfinite(phase)&&std::isfinite(visibleWeight)&&visibleWeight>=.5f
+            &&phase>=0&&phase<timing.downstrokeEnd;
+        const bool reuse=down && phase<=timing.downstrokeEnd*.30f;
+        if(reuse&&!credits_.empty()&&credits_.front().kind==Credit::manual)return true;
+        const bool finish=down&&!reuse;
+        if(finish&&credits_.empty()){
+            credits_.push_back({Credit::visual,0,true,++nextToken_});pending_=1;
+        }
+        pulse(true,false,cost,finish);
+        return reuse;
     }
     bool wantsFlap() const { return wantFlap_; }
     float rate() const { return rate_; }
@@ -210,7 +227,8 @@ public:
                 // Preserve half the remaining span even on a clamped hitch frame.
                 rate_=std::min(rate_,0.5f*remaining*frame.duration/dt);
             } else { rate_=t.recoveryRate+(rate_-t.recoveryRate)*std::exp(-18.0f*dt); }
-            if (descentGliding_ || (!continuous && normalTime_>=t.normalFlapSeconds)) { wantFlap_=false; }
+            const float recoveryHold=frame.highSpeed?frame.highSpeedFlapHoldSeconds:t.normalFlapSeconds;
+            if (descentGliding_ || (!continuous && normalTime_>=recoveryHold)) { wantFlap_=false; }
             if(descentGliding_)rate_=0; // fade to flutter; never start an unrequested loop
         }
     }

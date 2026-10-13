@@ -8,6 +8,9 @@
 #include "runtime_callable.hpp"
 #include "body_callsite.hpp"
 #include "vampire_runtime.hpp"
+#include "leg_pose_animation.hpp"
+#include "flight_pose_policy.hpp"
+#include "weapon_leg_handoff.hpp"
 #include <MinHook.h>
 #include <Windows.h>
 #include <atomic>
@@ -19,11 +22,13 @@
 
 namespace wingflight {
 namespace {
-constexpr std::array<const char*,8> bones{
-    "NPC L Thigh [LThg]","NPC L Calf [LClf]","NPC L Foot [Lft ]","NPC L Toe0 [LToe]",
-    "NPC R Thigh [RThg]","NPC R Calf [RClf]","NPC R Foot [Rft ]","NPC R Toe0 [RToe]"};
-constexpr std::array<const char*,8> keys{"LThigh","LCalf","LFoot","LToe","RThigh","RCalf","RFoot","RToe"};
-std::array<legs::Quaternion,8> target{};
+constexpr auto bones=legs::poseBoneNames;
+std::array<legs::LegPoseAnimation,3> legAnimations;
+legs::LegPoseBlend legPoseBlend;
+pose::TransitionTiming legPoseTiming;
+std::array<float,3> legPoseWeights{1,0,0};
+float legClock{};
+legs::WeaponLegHandoff weaponLegHandoff;
 std::array<std::atomic<const RE::hkbCharacter*>,8> characters{};
 std::atomic_bool wanted{},installed{};
 std::atomic_bool fastFlight{};
@@ -63,7 +68,7 @@ std::mutex poseMutex;
 std::unordered_map<const RE::hkbClipGenerator*,Clip> clips; // identity only; never dereference retained pointers
 std::unordered_set<std::string> logged;
 RE::NiPointer<RE::NiAVObject> root;
-struct Bone { RE::NiPointer<RE::NiAVObject> node; legs::Quaternion source{},output{}; bool wrote{}; };
+struct Bone { RE::NiPointer<RE::NiAVObject> node; legs::Quaternion source{},output{},visible{},handoffSeed{}; bool wrote{},visibleSeen{}; };
 std::array<Bone,8> cached;
 Bone center;
 std::array<Bone,5> aligned;
@@ -79,7 +84,7 @@ legs::Quaternion readRotation(const RE::NiMatrix3& r){
 void writeRotation(RE::NiMatrix3& r,legs::Quaternion q){
     const auto m=legs::matrix(q);for(int i=0;i<3;++i)for(int j=0;j<3;++j)r.entry[i][j]=m[i][j];
 }
-void resetLegMotion(){relaxationWeight=relaxationSampleTime=0;secondaryWeight=relaxation.secondaryMotion?1.0f:0.0f;legAcceleration.reset();for(auto& swing:legSwing)swing.reset();}
+void resetLegMotion(){relaxationWeight=relaxationSampleTime=0;secondaryWeight=relaxation.secondaryMotion?1.0f:0.0f;legAcceleration.reset();for(auto& swing:legSwing)swing.reset();legPoseBlend.reset();legPoseWeights={1,0,0};legClock=0;weaponLegHandoff.reset();}
 bool parentBasis(RE::NiAVObject* node,RE::NiAVObject* object,RE::NiMatrix3& basis){
     auto ancestor=node?node->parent:nullptr;unsigned depth=0;
     while(ancestor&&ancestor!=object&&depth++<64){basis=ancestor->local.rotate*basis;ancestor=ancestor->parent;}
@@ -100,15 +105,25 @@ bool excepted(){
     return result;
 }
 bool loadPose(){
-    const auto file=std::filesystem::absolute("Data/SKSE/Plugins/Wingflight/FlightLegPose.ini").string();
-    for(std::size_t i=0;i<target.size();++i){
-        char text[256]{};GetPrivateProfileStringA("Rotation",keys[i],"",text,sizeof(text),file.c_str());
-        std::string value(text);std::replace(value.begin(),value.end(),',',' ');std::istringstream in(value);
-        auto& q=target[i];if(!(in>>q.x>>q.y>>q.z>>q.w)||!std::isfinite(legs::dot(q,q))||std::abs(legs::dot(q,q)-1)>0.02f){
-            SKSE::log::error("Lower-body overlay disabled: missing/invalid FlightLegPose.ini rotation {} value='{}' squaredLength={} expected=1 +/-0.02",
-                keys[i],text,legs::dot(q,q));return false;
+    const auto resourceRoot=std::filesystem::path("Data/meshes/actors/character");
+    const auto paths=pose::resolveDefaults([&](std::string_view relative){
+        std::error_code error;return std::filesystem::is_regular_file(resourceRoot/relative,error);
+    });
+    for(unsigned mode=0;mode<3;++mode){
+        try{
+            if(paths[mode].empty())throw std::runtime_error("local pose and FAR resource are missing");
+            const auto file=resourceRoot/paths[mode];
+            const auto size=std::filesystem::file_size(file);
+            if(size>8*1024*1024)throw std::runtime_error("animation exceeds 8 MiB limit");
+            std::ifstream input(file,std::ios::binary);
+            if(!input)throw std::runtime_error("cannot open animation");
+            const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)),{});
+            if(input.bad())throw std::runtime_error("cannot finish reading animation");
+            legAnimations[mode]=legs::LegPoseAnimation::read(bytes);
+            SKSE::log::info("Lower-body animation reference: mode={} path={} duration={:.3f}s tracks=8; named leg rotations sampled throughout loop",mode+1,paths[mode],legAnimations[mode].duration);
+        }catch(const std::exception& error){
+            SKSE::log::error("Lower-body animation overlay disabled: mode={} path={} reason={}; upper-body flight and native animation remain available",mode+1,paths[mode],error.what());return false;
         }
-        q=legs::normalized(q);
     }
     return true;
 }
@@ -160,6 +175,29 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
     relaxation=relaxationBlend.update(dt);
     secondaryWeight=legs::approach(secondaryWeight,relaxation.secondaryMotion,dt,0.25f);
     const bool armed=player->AsActorState()->IsWeaponDrawn(),fast=fastFlight.load();
+    const auto weaponState=player->AsActorState()->GetWeaponState();
+    auto weaponPhase=legs::WeaponPosePhase::sheathed;
+    switch(weaponState){
+    case RE::WEAPON_STATE::kWantToDraw:case RE::WEAPON_STATE::kDrawing:weaponPhase=legs::WeaponPosePhase::drawing;break;
+    case RE::WEAPON_STATE::kDrawn:weaponPhase=legs::WeaponPosePhase::drawn;break;
+    case RE::WEAPON_STATE::kWantToSheathe:case RE::WEAPON_STATE::kSheathing:weaponPhase=legs::WeaponPosePhase::sheathing;break;
+    default:break;
+    }
+    // Cover the native/OAR recovery blend after the weapon state completes.
+    // At least the existing 0.75s pose interrupt blend must finish before release.
+    const float recoverySeconds=std::max({0.75f,legPoseTiming.movement,blendIn,blendOut,
+        fast?std::max(legPoseTiming.sprintIn,legPoseTiming.sprintOut):0.0f});
+    const auto handoff=weaponLegHandoff.update(weaponPhase,on&&legsReady,dt,blendIn,recoverySeconds);
+    if(handoff.capture&&logSamples)
+        SKSE::log::info("Flight leg weapon handoff: state={} armed={} retainFlightLegs=true recovery={:.3f}s; native thigh motion resumes after handoff",static_cast<unsigned>(weaponState),armed,recoverySeconds);
+    legs::LegPose target{};
+    if(legEnabled){
+        if(on&&(armed||handoff.protect))legClock+=dt;
+        legPoseWeights=legPoseBlend.update(legs::legPoseMode(fast,motionX.load(),motionY.load()),dt,legPoseTiming);
+        std::array<legs::LegPose,3> sampled;
+        for(unsigned mode=0;mode<3;++mode)sampled[mode]=legAnimations[mode].sample(legClock);
+        target=legs::mixLegPoses(sampled,legPoseWeights);
+    }
     pitchAngle=pitchMotion.update(dt,pathPitch.load(),pitchEnabled&&on&&fast,pitchSeconds);
     const bool attacking=player->IsAttacking(),blocking=player->IsBlocking();
     bankAngle=bankMotion.update(dt,bankTurn.load(),legs::flightBankWanted(bankEnabled,on,armed,armedBankEnabled,attacking,blocking),
@@ -170,11 +208,12 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
     const float alignSeconds=alignOn?leanIn:(attacking||blocking?0.12f:leanOut);
     alignWeight=legs::approach(alignWeight,alignOn,dt,alignSeconds);
     const float alignEased=alignWeight*alignWeight*(3-2*alignWeight);
-    weight=legs::approach(weight,on&&legsReady,dt,on?blendIn:blendOut);
+    if(handoff.protect)weight=1; // continuous coverage at both weapon-state edges
+    else weight=legs::approach(weight,on&&legsReady&&armed,dt,on&&armed?blendIn:blendOut);
     const float eased=weight*weight*(3-2*weight);
-    const bool relaxing=on&&legsReady&&armed&&relaxation.enabled;
+    const bool relaxing=on&&legsReady&&armed&&!handoff.protect&&relaxation.enabled;
     relaxationWeight=legs::approach(relaxationWeight,relaxing,dt,relaxing?blendIn:blendOut);
-    const float relaxed=relaxationWeight*relaxationWeight*(3-2*relaxationWeight);
+    const float relaxed=handoff.protect?0.0f:relaxationWeight*relaxationWeight*(3-2*relaxationWeight);
     for(auto& b:aligned)if(b.node){
         auto source=readRotation(b.node->local.rotate);
         if(b.wrote&&std::abs(legs::dot(source,b.output))>0.999999f)source=b.source;
@@ -242,6 +281,7 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
         // Never feed our last rendered pose back into an unkeyed animation bone.
         if(b.wrote&&std::abs(legs::dot(source,b.output))>0.999999f)source=b.source;
         auto pose=target[i];float boneWeight=eased;
+        if(handoff.capture)b.handoffSeed=b.visibleSeen?b.visible:pose;
         const auto joint=i%4,side=i/4;
         if(joint==0)boneWeight=legs::thighFlightWeight(eased,relaxed,relaxation.thighAnimationWeight);
         else if(joint==1){
@@ -257,16 +297,20 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
             const float angle=legSwing[side].update(dt,parent,drive,relaxing&&relaxation.secondaryMotion,springTuning);
             pose=legs::kneeSwing(pose,angle*relaxed*secondaryWeight);
         }else if(joint==2)pose=legs::kneeSwing(pose,-0.25f*legSwing[side].angle()*relaxed*secondaryWeight);
+        if(handoff.protect){pose=legs::blend(b.handoffSeed,pose,handoff.poseBlend);boneWeight=1;}
         if(eased>0){
             b.source=source;b.output=legs::blend(source,pose,boneWeight);b.wrote=true;
             writeRotation(b.node->local.rotate,b.output);
         }else if(b.wrote){writeRotation(b.node->local.rotate,source);b.wrote=false;}
+        b.visible=readRotation(b.node->local.rotate);b.visibleSeen=true;
     }
     if(relaxationWeight==0){for(auto& swing:legSwing)swing.reset();}
     if(logSamples&&relaxing&&(relaxationSampleTime+=dt)>=2){
         relaxationSampleTime=0;
-        SKSE::log::info("Armed leg relaxation: authoredThigh={:.2f} weight={:.3f} kneeSwing={:.2f}/{:.2f}deg max={:.2f} stiffness={:.2f} damping={:.2f}",
-            relaxation.thighAnimationWeight,relaxed,legSwing[0].angle(),legSwing[1].angle(),relaxation.maxSwingDegrees,relaxation.stiffness,relaxation.damping);
+        const auto difference=[&](unsigned bone){return 114.591559f*std::acos(std::clamp(std::abs(legs::dot(cached[bone].source,target[bone])),0.0f,1.0f));};
+        SKSE::log::info("Armed leg relaxation: authoredThigh={:.2f} weight={:.3f} kneeSwing={:.2f}/{:.2f}deg max={:.2f} stiffness={:.2f} damping={:.2f} poseWeights={:.2f}/{:.2f}/{:.2f} nativeThighVsReference={:.2f}/{:.2f}deg",
+            relaxation.thighAnimationWeight,relaxed,legSwing[0].angle(),legSwing[1].angle(),relaxation.maxSwingDegrees,relaxation.stiffness,relaxation.damping,
+            legPoseWeights[0],legPoseWeights[1],legPoseWeights[2],difference(0),difference(4));
     }
     if(eased>0&&appliedSamples++<6)
         SKSE::log::info("Lower-body pose applied: frame={} weight={:.3f} bones=8 updateTime={:.4f}",now,eased,data?data->time:0);
@@ -319,6 +363,7 @@ void installLowerBody(const Configuration& config){
     legEnabled=config.lowerBodyEnabled;leanEnabled=config.armedSprintLean;
     relaxation=config.legRelaxation;logSamples=config.logSamples;
     relaxationBlend.initialize(relaxation);secondaryWeight=relaxation.secondaryMotion?1.0f:0.0f;
+    legPoseTiming={config.movementBlendSeconds,config.sprintBlendInSeconds,config.sprintBlendOutSeconds};
     pitchEnabled=config.highSpeedPitch;pitchSeconds=config.highSpeedPitchBlendSeconds;
     autoAlignEnabled=config.armedSprintAutoAlign;
     bankEnabled=config.bodyTiming.banking;armedBankEnabled=config.armedBanking;

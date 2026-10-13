@@ -3,6 +3,7 @@
 #include "wings.hpp"
 #include "runtime_support.hpp"
 #include "diagnostics.hpp"
+#include "jump_wing_preview.hpp"
 #include <RE/H/hkbContext.h>
 #include <RE/H/hkbBehaviorGraphData.h>
 #include <RE/N/NiKeyBasedInterpolator.h>
@@ -35,6 +36,9 @@ struct State {
     std::array<visual::Clock,3> clocks;
     std::array<float,3> begin{},originalRates{};
     WaveWeights desired{},displayed{};
+    WaveWeights previewSeed{};
+    bool previewing{},previewHandoff{};
+    float previewFlutter{1},previewFlutterSeed{1};
     std::array<float,3> displayedPhase{},displayedRate{};
     float delta{},fastEntry{},pitch{},amplitude{1},unobserved{};
     std::uint64_t requested{},applied{};
@@ -152,14 +156,14 @@ struct ControllerUpdate {
                         if(t.samplers[i]->Update1(time,t.node.get(),output))poses[i+1]=visual::validSample(value,t.reference,t.node.get());
                         else diagnostic::report("sample.update-failed","use reference pose",t.samplers[i].get(),t.node->name.c_str(),time);
                     }
-                    const auto q=flutter::scale(t.flutterCenter,{poses[3].qx,poses[3].qy,poses[3].qz,poses[3].w},s->amplitude);
+                    const auto q=flutter::scale(t.flutterCenter,{poses[3].qx,poses[3].qy,poses[3].qz,poses[3].w},previewFlutterAmplitude(s->previewing||s->previewHandoff,s->previewFlutter,s->amplitude));
                     poses[3].w=q.w;poses[3].qx=q.x;poses[3].qy=q.y;poses[3].qz=q.z;
                     const auto result=visual::combine(poses,weights);writeTransform(t.node->local,result);
                     t.output=t.node->local;t.wrote=true;
                 }
                 angleOverlay(*s);
-                if(s->samples++<4)SKSE::log::info("Runtime wing pose applied: tracks={} phase={:.4f} weights={:.3f}/{:.3f}/{:.3f} (original assets unchanged)",
-                    s->tracks.size(),s->clocks[0].phase,s->displayed.flap,s->displayed.fast,s->displayed.spread);
+                if(s->samples++<4)SKSE::log::info("Runtime wing pose applied: tracks={} phase={:.4f} weights={:.3f}/{:.3f}/{:.3f} spreadPhase={:.4f} spreadRate={:.3f} spreadAmplitude={:.3f} jumpPreview={} (original assets unchanged)",
+                    s->tracks.size(),s->clocks[0].phase,s->displayed.flap,s->displayed.fast,s->displayed.spread,s->clocks[2].phase,s->clocks[2].rate,previewFlutterAmplitude(s->previewing||s->previewHandoff,s->previewFlutter,s->amplitude),s->previewing);
             }else{
                 for(auto& t:s->tracks){if(t.wrote&&t.node->local==t.output)t.node->local=t.before;t.wrote=false;}
             }
@@ -371,7 +375,26 @@ bool WingRuntime::blend(float flap,float ownership,float fast){
     if(!std::isfinite(flap)||!std::isfinite(ownership)||!std::isfinite(fast)){
         diagnostic::report("wing.blend-nonfinite","ignore blend command",impl_.get(),fmt::format("flap={} ownership={} fast={}",flap,ownership,fast));return false;}
     const auto weights=waveContributions(std::clamp(flap,0.0f,1.0f),std::clamp(fast,0.0f,1.0f),std::clamp(ownership,0.0f,1.0f));
-    for(auto& s:impl_->states){std::lock_guard lock(s->mutex);s->desired=weights;}
+    for(auto& s:impl_->states){std::lock_guard lock(s->mutex);
+        if(s->previewing){s->previewSeed=s->displayed;s->previewFlutterSeed=s->previewFlutter;s->previewHandoff=true;s->previewing=false;}
+        s->desired=s->previewHandoff?interpolateWeights(s->previewSeed,waveContributions(std::clamp(flap,0.f,1.f),std::clamp(fast,0.f,1.f),1),ownership):weights;
+        s->previewFlutter=s->previewHandoff?previewFlutterHandoff(ownership,s->previewFlutterSeed,s->amplitude):s->amplitude;
+        if(ownership>=1)s->previewHandoff=false;
+    }
+    return !impl_->states.empty();
+}
+bool WingRuntime::preview(float amount,float period,float amplitude){
+    if(!std::isfinite(amount)||!std::isfinite(period)||!std::isfinite(amplitude)||period<=0)return false;
+    for(auto& s:impl_->states){std::lock_guard lock(s->mutex);
+        const float desiredAmplitude=std::clamp(amplitude,0.f,2.f);
+        s->previewFlutter=s->previewing?desiredAmplitude+(s->previewFlutter-desiredAmplitude)*std::exp(-12*s->delta):desiredAmplitude;
+        s->previewing=true;s->previewHandoff=false;s->pitch=0;
+        const float weight=std::clamp(amount,0.f,1.f);
+        s->desired={0,0,weight,1-weight};
+        // Keep the authored loop moving gently; preserve its current phase so
+        // takeoff/glide continues from the exact displayed wing pose.
+        s->clocks[2].rate=s->clocks[2].duration/period;
+    }
     return !impl_->states.empty();
 }
 bool WingRuntime::parkPower(){bool ok=!impl_->states.empty();for(auto& s:impl_->states){std::lock_guard lock(s->mutex);

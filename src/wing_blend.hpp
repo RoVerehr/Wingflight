@@ -15,6 +15,10 @@ inline float glidePlaybackScale(float visibleWeight, float loopMultiplier=1) {
     return base*(1+(multiplier-1)*q*q*(3-2*q));
 }
 struct WaveWeights {float flap{},fast{},spread{},original{};};
+inline WaveWeights interpolateWeights(WaveWeights a,WaveWeights b,float progress){
+    const float p=std::clamp(progress,0.f,1.f),q=1-p;
+    return {a.flap*q+b.flap*p,a.fast*q+b.fast*p,a.spread*q+b.spread*p,a.original*q+b.original*p};
+}
 inline WaveWeights waveContributions(float flap,float fast,float ownership){
     return {flap*ownership,(1-flap)*fast*ownership,(1-flap)*(1-fast)*ownership,1-ownership};
 }

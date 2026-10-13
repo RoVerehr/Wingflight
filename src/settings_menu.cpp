@@ -126,6 +126,13 @@ void renderSection(const char* section) {
         tooltip("Enable damped calf/ankle inertia. Off keeps the selected thigh animation retention without procedural swing.");
         ImGuiMCP::TextWrapped("Apply and Save changes these values live. Parameter changes and swing toggles blend smoothly. LowerBody/Enabled remains an INI-only startup switch.");
     }
+    if(std::string_view(section)=="Collision") {
+        ImGuiMCP::Checkbox("Enabled",&draft.collision.enabled);
+        tooltip("Enable physical collision damage during flight. One contact episode cannot drain health repeatedly. Native falling after exiting flight is unchanged.");
+        ImGuiMCP::Checkbox("DamageActors",&draft.collision.damageActors);
+        tooltip("Also damage directly contacted NPCs/creatures, including allies. The player remains vulnerable when this option is off.");
+        ImGuiMCP::TextWrapped("Uses actual physics contacts, not nearby actors. Closing speed into a surface determines damage. Menus and bat travel suspend detection. Apply and Save changes these options live.");
+    }
     actions();
     ImGuiMCP::EndDisabled();
 }
@@ -134,6 +141,7 @@ void __stdcall renderFree(){renderSection("FreeFlight");}
 void __stdcall renderStamina(){renderSection("Stamina");}
 void __stdcall renderJump(){renderSection("Jump");}
 void __stdcall renderLowerBody(){renderSection("LowerBody");}
+void __stdcall renderCollision(){renderSection("Collision");}
 void binding(const char* label,int target,std::uint32_t& code) {
     ImGuiMCP::PushID(label);
     ImGuiMCP::Text("%s: %s",label,target>3?gamepadButtonName(code):keyName(code).c_str());
@@ -192,9 +200,10 @@ void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) 
     SKSEMenuFramework::AddSectionItem("Stamina",renderStamina);
     SKSEMenuFramework::AddSectionItem("Jump",renderJump);
     SKSEMenuFramework::AddSectionItem("Lower Body",renderLowerBody);
+    SKSEMenuFramework::AddSectionItem("Collision",renderCollision);
     SKSEMenuFramework::AddSectionItem("Controls",renderControls);
     captureInput=std::make_unique<SKSEMenuFramework::Model::InputEvent>(onInput);
     registered.store(true,std::memory_order_release);
-    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, Free Flight, Stamina, Jump, Lower Body, Controls");
+    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, Free Flight, Stamina, Jump, Lower Body, Collision, Controls");
 }
 }

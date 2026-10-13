@@ -1,4 +1,5 @@
 #include "flight_audio.hpp"
+#include "diagnostics.hpp"
 #include <SKSE/SKSE.h>
 #include <unordered_set>
 #include <vector>
@@ -11,6 +12,24 @@ std::unordered_set<std::string> footTags;
 std::unordered_set<const RE::BGSSoundDescriptorForm*> footSounds;
 std::vector<RE::TESTopicInfo*> breathInfos;
 bool installed{},enabled{};
+RE::BGSSoundDescriptorForm* collisionSound{};
+RE::TESTopic* collisionPainTopic{};
+class PainCompleted final : public RE::BSScript::IStackCallbackFunctor {
+public:
+    void operator()(RE::BSScript::Variable) override {SKSE::log::info("Flight collision pain: native Say call completed (audible voice depends on topic/voice availability)");}
+    void SetObject(const RE::BSTSmartPointer<RE::BSScript::Object>&) override {}
+};
+void playCollisionPain(RE::PlayerCharacter* player){
+    if(!player||player->IsDead())return;
+    auto vm=RE::BSScript::Internal::VirtualMachine::GetSingleton();
+    if(!vm||!collisionPainTopic){diagnostic::report("collision.pain-topic-unavailable","retain impact sound without pain voice",player);return;}
+    const auto handle=vm->GetObjectHandlePolicy()->GetHandleForObject(static_cast<RE::VMTypeID>(player->GetFormType()),player);
+    RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(new PainCompleted());
+    const bool queued=vm->DispatchMethodCall(handle,"Actor","Say",
+        RE::MakeFunctionArguments(static_cast<RE::TESTopic*>(collisionPainTopic),static_cast<RE::Actor*>(nullptr),false),callback);
+    SKSE::log::info("Flight collision pain: topic={:08X} nativeSayQueued={} (current player voice; no extra damage)",collisionPainTopic->GetFormID(),queued);
+    if(!queued)diagnostic::report("collision.pain-dispatch-failed","retain impact sound without pain voice",player);
+}
 
 void installBreathConditions(RE::PlayerCharacter* player){
     if(installed||!player)return;
@@ -42,6 +61,10 @@ void initializeFlightAudio(bool muteBreath){
     enabled=muteBreath;
     const auto handler=RE::TESDataHandler::GetSingleton();
     if(!handler)return;
+    // Vanilla unarmed impact against flesh; sex/race independent and compatible
+    // with sound replacers. No copied sound asset or generated hit event.
+    collisionSound=handler->LookupForm<RE::BGSSoundDescriptorForm>(0xC190D,"Skyrim.esm");
+    collisionPainTopic=handler->LookupForm<RE::TESTopic>(0x13EBB,"Skyrim.esm");
     for(auto* foot:handler->GetFormArray<RE::BGSFootstep>()){
         if(!foot||!foot->tag.c_str()||!std::string_view(foot->tag.c_str()).starts_with("Foot"))continue;
         footTags.emplace(foot->tag.c_str());
@@ -77,6 +100,18 @@ void updateFlightBreath(RE::PlayerCharacter* player,bool fullAirborneFlight){
     if(player->SetGraphVariableInt(breathConditionName,fullAirborneFlight?1:0))installBreathConditions(player);
 }
 bool registeredFootContact(std::string_view tag){return footTags.contains(std::string(tag));}
+void playFlightCollisionSound(RE::PlayerCharacter* player){
+    playCollisionPain(player);
+    const auto audio=RE::BSAudioManager::GetSingleton();
+    if(!player||!collisionSound||!audio){
+        diagnostic::report("collision.sound-unavailable","skip impact sound; collision release continues",player);return;
+    }
+    RE::BSSoundHandle handle;
+    const bool built=audio->GetSoundHandle(handle,collisionSound);bool played=false;
+    if(built){handle.SetPosition(player->GetPosition());if(auto node=player->Get3D())handle.SetObjectToFollow(node);played=handle.Play();}
+    SKSE::log::info("Flight collision sound: descriptor={:08X} built={} played={}",collisionSound->GetFormID(),built,played);
+    if(!built||!played)diagnostic::report("collision.sound-play-failed","skip impact sound; collision release continues",player);
+}
 bool registeredFootSound(std::string_view name){
     if(name.empty())return false;
     const auto form=RE::TESForm::LookupByEditorID(name);
