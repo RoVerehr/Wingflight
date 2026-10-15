@@ -1,8 +1,10 @@
 #include "wings.hpp"
+#include "logging.hpp"
 #include "effect_owner.hpp"
 #include "awu_compatibility.hpp"
 #include "vampire_runtime.hpp"
 #include "continuous_wing_rate.hpp"
+#include "actor_flight.hpp"
 #include <SKSE/SKSE.h>
 #include <unordered_set>
 
@@ -60,7 +62,7 @@ void Wings::prepareContinuousAnimation(WingMatch match,bool active,bool highSpee
             // Clip02 crops the original loop to a narrow tremor. Select the
             // original full-loop jump state on the ART after releasing its lock.
             const bool accepted=model->NotifyAnimationGraph("JumpStandingStart");
-            SKSE::log::info("Continuous wing full-cycle request: adapter={} previousState={} requestedState=2 event=JumpStandingStart accepted={} (wing ART only)",match.profile->id,wingState,accepted);
+            SKSE::log::debug("Continuous wing full-cycle request: adapter={} previousState={} requestedState=2 event=JumpStandingStart accepted={} (wing ART only)",match.profile->id,wingState,accepted);
             if(!accepted)diagnostic::report("continuous.full-cycle-request-rejected","retain rate override and retry",model,match.profile->id);
         }
     }
@@ -72,15 +74,16 @@ void Wings::prepareContinuousAnimation(WingMatch match,bool active,bool highSpee
     if(same)for(unsigned i=0;i<count;++i)if(current->graphs[i].get()!=graphs[i].get()||current->roots[i].get()!=roots[i].get()){same=false;break;}
     if(same){
         const float previous=current->rate.exchange(rate);
-        if(previous!=rate)SKSE::log::info("Continuous wing frequency changed: adapter={} playbackSpeed={:.2f} highSpeed={} FastFlapPlaybackMultiplier={:.2f}",match.profile->id,rate,highSpeed,fastMultiplier);
+        if(previous!=rate)SKSE::log::debug("Continuous wing frequency changed: adapter={} playbackSpeed={:.2f} highSpeed={} FastFlapPlaybackMultiplier={:.2f}",match.profile->id,rate,highSpeed,fastMultiplier);
         return;
     }
     auto next=std::make_shared<ContinuousWingBinding>();next->graphs=std::move(graphs);next->roots=std::move(roots);next->count=count;next->rate=rate;
     if(auto old=continuousBinding.exchange(next))old->rate=0;
-    SKSE::log::info("Continuous wing animation registered: adapter={} ownedGraphs={} playbackSpeed={:.2f}; jump rate in flight including Descend, sprint uses FastFlapPlaybackMultiplier",match.profile->id,count,rate);
+    SKSE::log::debug("Continuous wing animation registered: adapter={} ownedGraphs={} playbackSpeed={:.2f}; jump rate in flight including Descend, sprint uses FastFlapPlaybackMultiplier",match.profile->id,count,rate);
 }
 float continuousWingClipRate(const RE::hkbClipGenerator* clip,const RE::hkbContext& context){
     if(!clip||!context.character)return 0;
+    if(const float actorRate=actorContinuousWingRate(clip,context);actorRate>0)return actorRate;
     const auto state=continuousBinding.load();if(!state)return 0;
     const float rate=state->rate.load();if(rate<=0)return 0;
     bool owned=false;for(unsigned i=0;i<state->count;++i)if(&state->graphs[i]->characterInstance==context.character){owned=true;break;}
@@ -90,8 +93,8 @@ float continuousWingClipRate(const RE::hkbClipGenerator* clip,const RE::hkbConte
     return rate;
 }
 void observeContinuousWingClip(const RE::hkbClipGenerator* clip,float before,float dt,float rate){
-    if(clip&&rate>0&&continuousRateSamples.fetch_add(1)<12)
-        SKSE::log::info("Continuous wing rate applied: clip={} flightRate={:.2f} restoredProviderRate={:.2f} timeBefore={:.4f} timeAfter={:.4f} nativeStep={:.4f} (wing graph only)",
+    if(logging::detailed()&&clip&&rate>0&&continuousRateSamples.fetch_add(1)<12)
+        SKSE::log::debug("Continuous wing rate applied: clip={} flightRate={:.2f} restoredProviderRate={:.2f} timeBefore={:.4f} timeAfter={:.4f} nativeStep={:.4f} (wing graph only)",
             clip->name.c_str(),rate,clip->playbackSpeed,before,clip->localTime,dt);
 }
 bool Wings::initialize(float amplitude){artReady_=runtime_.install(amplitude);return artReady_;}
@@ -232,7 +235,7 @@ void Wings::updatePowerSound(WingMatch match,const WingPlayback& playback){
         RE::BSSoundHandle handle;const bool built=audio->GetSoundHandle(handle,found->second);bool played=false;
         if(built){handle.SetPosition(match.owner->GetPosition());if(auto node=match.owner->Get3D())handle.SetObjectToFollow(node);
             if(volume!=1.0f)handle.SetVolume(volume);played=handle.Play();}
-        SKSE::log::info("Runtime {} sound: phase={:.4f} built={} played={} descriptor={:08X}",kind,phase,built,played,found->second->GetFormID());
+        SKSE::log::debug("Runtime {} sound: phase={:.4f} built={} played={} descriptor={:08X}",kind,phase,built,played,found->second->GetFormID());
         if(!built||!played)diagnostic::report(!built?"sound.handle-build-failed":"sound.play-failed","skip this playback",match.owner,
             fmt::format("kind={} descriptor={:08X}",kind,found->second->GetFormID()));
     };
@@ -255,7 +258,9 @@ WingMatch Wings::find(RE::Actor* actor,bool ownedFlight) const {
         if (!effect || effect->flags.any(RE::ActiveEffect::Flag::kInactive, RE::ActiveEffect::Flag::kDispelled)) { continue; }
         const auto found = effects_.find(effect->GetBaseObject());
         if (found != effects_.end()) {
-            if(found->second->awuCompatibility && !awuEffectReady(actor,effect))continue;
+            // AWU's Jump input listener is player-only. NPCs use the same
+            // visible-effect/provider binding without waiting for player input.
+            if(found->second->awuCompatibility && actor==RE::PlayerCharacter::GetSingleton() && !awuEffectReady(actor,effect))continue;
             if(found->second->animationless) {
                 if(wingEventActor(actor,effect))invisible={found->second,effect,actor};
                 continue;
@@ -330,7 +335,7 @@ void Wings::updateGroundRecovery(WingMatch match,float dt,bool grounded,bool ful
             // MTState is an original AWU transition from jump flutter to folding.
             // Send to this wing ART only; never Actor::NotifyAnimationGraph.
             const bool accepted=model->NotifyAnimationGraph("MTState");
-            SKSE::log::info("AWU grounded wing recovery: replayed wing-only MTState accepted={} (physical support, flutter state8)",accepted);
+            SKSE::log::debug("AWU grounded wing recovery: replayed wing-only MTState accepted={} (physical support, flutter state8)",accepted);
         }
     }
     std::erase_if(groundRecovery_,[&](const auto& item){return !current.contains(item.first);});

@@ -1,10 +1,12 @@
 #include "glide_clip.hpp"
+#include "logging.hpp"
 #include "glide_clip_policy.hpp"
 #include "lower_body.hpp"
 #include "armed_sprint_clip.hpp"
 #include "flight_pose.hpp"
 #include "wings.hpp"
 #include "continuous_wing_rate.hpp"
+#include "actor_flight.hpp"
 #include <SKSE/SKSE.h>
 #include <array>
 #include <atomic>
@@ -12,12 +14,14 @@ namespace wingflight {
 namespace {
 std::array<std::atomic<const RE::hkbCharacter*>,8> characters{};
 std::atomic_uint samples{};
+std::atomic_uint npcSamples{};
 struct ClipUpdate {
     static void thunk(RE::hkbClipGenerator* clip,const RE::hkbContext& context,float dt) {
         updateArmedSprintIdle(clip,context);
         updateFlightPose(clip,context);
         bool selected=false;
         if(context.character) for(auto& character:characters) if(character.load()==context.character){selected=true;break;}
+        const bool npcFalling=actorFallClipGuard(context.character);selected=selected||npcFalling;
         if(selected && clip && clip->name.c_str() && timedFallClip(clip->name.c_str())
             && clip->mode==RE::hkbClipGenerator::kModeSinglePlay && clip->binding && clip->binding->animation
             && clip->triggers && context.behavior && context.behavior->data && context.behavior->data->stringData) {
@@ -31,8 +35,8 @@ struct ClipUpdate {
                 if(event!="JumpLand" && event!="JumpLandDirectional") continue;
                 const float duration=clip->binding->animation->duration-clip->cropStartAmountLocalTime-clip->cropEndAmountLocalTime;
                 const float step=glideClipStep(dt,clip->localTime,duration,clip->playbackSpeed,trigger.localTime);
-                if(step<dt && samples.fetch_add(1)<12)
-                    SKSE::log::info("Held glide: native fall clip held before timer; clip={} time={:.3f} duration={:.3f} step={:.4f}",clip->name.c_str(),clip->localTime,duration,step);
+                if(logging::detailed()&&step<dt && (npcFalling?npcSamples:samples).fetch_add(1)<12)
+                    SKSE::log::debug("{}: native fall clip held before timer; clip={} time={:.3f} duration={:.3f} step={:.4f}; physical landing remains native",npcFalling?"NPC descent":"Held glide",clip->name.c_str(),clip->localTime,duration,step);
                 dt=step;
                 break;
             }

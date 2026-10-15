@@ -95,7 +95,7 @@ void actions() {
                 pending=false;
                 if(error.empty()) {
                     status="Applied and saved to Data/SKSE/Plugins/Wingflight.ini.";
-                    SKSE::log::info("Mod Control Panel: live settings applied and saved");
+                    SKSE::log::debug("Mod Control Panel: live settings applied and saved");
                 } else {status="Settings were not applied: "+error;SKSE::log::warn("Mod Control Panel: {}",error);}
             });
         }
@@ -118,6 +118,18 @@ void renderSection(const char* section) {
     if(std::string_view(section)=="Flight") {
         ImGuiMCP::Checkbox("DisableSprintWhenArmed",&draft.disableSprintWhenArmed);
         tooltip("Disable armed sprint flight. Drawing a weapon also ends high-speed flight. Ground sprint is unchanged.");
+    }
+    if(std::string_view(section)=="General") {
+        ImGuiMCP::Checkbox("Detailed Logging",&draft.logSamples);
+        tooltip("Off keeps initialization, compatibility checks, warnings and errors. On also records flight, wing, animation, NPC and combat details in Wingflight.log. Apply and Save takes effect immediately.");
+        ImGuiMCP::TextWrapped("Leave off for normal play. Enable before reproducing a problem, then turn it off after collecting the log. Warnings and errors are always recorded.");
+    }
+    if(std::string_view(section)=="NPCFlight") {
+        ImGuiMCP::Checkbox("Allow NPC Flight",&draft.actors.enabled);
+        tooltip("Allow winged NPCs following the player to take off. Off prevents new takeoffs and safely lands airborne NPCs. Does not change player flight.");
+        ImGuiMCP::Checkbox("Allow Air Combat",&draft.actors.airCombat);
+        tooltip("Allow already-flying followers to fight in air. Native AI chooses enemies, equipment and attacks; Wingflight moves melee fighters into reach and keeps ranged fighters at weapon range. Off safely lands them for combat. Fleeing or unavailable combat data falls back to ground combat.");
+        ImGuiMCP::TextWrapped("FollowDistance sets the gap behind your current position. Apply and Save changes these settings without restarting. NPCs need supported wings and an active follow order. Air combat ends in following or landing when combat stops.");
     }
     if(std::string_view(section)=="LowerBody") {
         ImGuiMCP::Checkbox("RelaxedArmedLegs",&draft.legRelaxation.enabled);
@@ -142,6 +154,8 @@ void __stdcall renderStamina(){renderSection("Stamina");}
 void __stdcall renderJump(){renderSection("Jump");}
 void __stdcall renderLowerBody(){renderSection("LowerBody");}
 void __stdcall renderCollision(){renderSection("Collision");}
+void __stdcall renderNPCFlight(){renderSection("NPCFlight");}
+void __stdcall renderLogging(){renderSection("General");}
 void binding(const char* label,int target,std::uint32_t& code) {
     ImGuiMCP::PushID(label);
     ImGuiMCP::Text("%s: %s",label,target>3?gamepadButtonName(code):keyName(code).c_str());
@@ -196,6 +210,7 @@ void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) 
     draft=initial;applySettings=std::move(apply);
     SKSEMenuFramework::SetSection("Wingflight");
     SKSEMenuFramework::AddSectionItem("Flight",renderFlight);
+    SKSEMenuFramework::AddSectionItem("NPC Flight",renderNPCFlight);
     SKSEMenuFramework::AddSectionItem("Free Flight",renderFree);
     SKSEMenuFramework::AddSectionItem("Stamina",renderStamina);
     SKSEMenuFramework::AddSectionItem("Jump",renderJump);
@@ -204,6 +219,7 @@ void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) 
     SKSEMenuFramework::AddSectionItem("Controls",renderControls);
     captureInput=std::make_unique<SKSEMenuFramework::Model::InputEvent>(onInput);
     registered.store(true,std::memory_order_release);
-    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, Free Flight, Stamina, Jump, Lower Body, Collision, Controls");
+    SKSEMenuFramework::AddSectionItem("Logging",renderLogging);
+    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, NPC Flight, Free Flight, Stamina, Jump, Lower Body, Collision, Controls, Logging");
 }
 }

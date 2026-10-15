@@ -16,7 +16,7 @@ RE::BGSSoundDescriptorForm* collisionSound{};
 RE::TESTopic* collisionPainTopic{};
 class PainCompleted final : public RE::BSScript::IStackCallbackFunctor {
 public:
-    void operator()(RE::BSScript::Variable) override {SKSE::log::info("Flight collision pain: native Say call completed (audible voice depends on topic/voice availability)");}
+    void operator()(RE::BSScript::Variable) override {SKSE::log::debug("Flight collision pain: native Say call completed (audible voice depends on topic/voice availability)");}
     void SetObject(const RE::BSTSmartPointer<RE::BSScript::Object>&) override {}
 };
 void playCollisionPain(RE::PlayerCharacter* player){
@@ -27,7 +27,7 @@ void playCollisionPain(RE::PlayerCharacter* player){
     RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(new PainCompleted());
     const bool queued=vm->DispatchMethodCall(handle,"Actor","Say",
         RE::MakeFunctionArguments(static_cast<RE::TESTopic*>(collisionPainTopic),static_cast<RE::Actor*>(nullptr),false),callback);
-    SKSE::log::info("Flight collision pain: topic={:08X} nativeSayQueued={} (current player voice; no extra damage)",collisionPainTopic->GetFormID(),queued);
+    SKSE::log::debug("Flight collision pain: topic={:08X} nativeSayQueued={} (current player voice; no extra damage)",collisionPainTopic->GetFormID(),queued);
     if(!queued)diagnostic::report("collision.pain-dispatch-failed","retain impact sound without pain voice",player);
 }
 
@@ -109,7 +109,7 @@ void playFlightCollisionSound(RE::PlayerCharacter* player){
     RE::BSSoundHandle handle;
     const bool built=audio->GetSoundHandle(handle,collisionSound);bool played=false;
     if(built){handle.SetPosition(player->GetPosition());if(auto node=player->Get3D())handle.SetObjectToFollow(node);played=handle.Play();}
-    SKSE::log::info("Flight collision sound: descriptor={:08X} built={} played={}",collisionSound->GetFormID(),built,played);
+    SKSE::log::debug("Flight collision sound: descriptor={:08X} built={} played={}",collisionSound->GetFormID(),built,played);
     if(!built||!played)diagnostic::report("collision.sound-play-failed","skip impact sound; collision release continues",player);
 }
 bool registeredFootSound(std::string_view name){

@@ -1,4 +1,5 @@
 #include "wing_runtime.hpp"
+#include "logging.hpp"
 #include "wing_runtime_policy.hpp"
 #include "wings.hpp"
 #include "runtime_support.hpp"
@@ -162,7 +163,7 @@ struct ControllerUpdate {
                     t.output=t.node->local;t.wrote=true;
                 }
                 angleOverlay(*s);
-                if(s->samples++<4)SKSE::log::info("Runtime wing pose applied: tracks={} phase={:.4f} weights={:.3f}/{:.3f}/{:.3f} spreadPhase={:.4f} spreadRate={:.3f} spreadAmplitude={:.3f} jumpPreview={} (original assets unchanged)",
+                if(logging::detailed()&&s->samples++<4)SKSE::log::debug("Runtime wing pose applied: tracks={} phase={:.4f} weights={:.3f}/{:.3f}/{:.3f} spreadPhase={:.4f} spreadRate={:.3f} spreadAmplitude={:.3f} jumpPreview={} (original assets unchanged)",
                     s->tracks.size(),s->clocks[0].phase,s->displayed.flap,s->displayed.fast,s->displayed.spread,s->clocks[2].phase,s->clocks[2].rate,previewFlutterAmplitude(s->previewing||s->previewHandoff,s->previewFlutter,s->amplitude),s->previewing);
             }else{
                 for(auto& t:s->tracks){if(t.wrote&&t.node->local==t.output)t.node->local=t.before;t.wrote=false;}
@@ -218,7 +219,7 @@ struct GeneratorUpdate {
         } restore{raw,keys,count};
         auto temporary=retained.data();std::memcpy(raw+0x58,&temporary,sizeof(temporary));std::memcpy(raw+0x60,&kept,sizeof(kept));
         original(generator,context,delta);
-        {std::lock_guard lock(s->mutex);if(s->audioSamples++<3)SKSE::log::info("Runtime wing audio isolated: removed={} retained={} (player art only)",count-kept,kept);}
+        if(logging::detailed()){std::lock_guard lock(s->mutex);if(s->audioSamples++<3)SKSE::log::debug("Runtime wing audio isolated: removed={} retained={} (player art only)",count-kept,kept);}
     }
     static inline REL::Relocation<decltype(thunk)> original;
 };
@@ -232,6 +233,8 @@ WingRuntime::WingRuntime():impl_(std::make_unique<Impl>()){}
 WingRuntime::~WingRuntime(){release(false);}
 bool WingRuntime::install(float amplitude){
     impl_->amplitude=amplitude;
+    // Additional actors own separate samplers, not another copy of the hooks.
+    if(hooksReady.load()){impl_->installed=true;return true;}
     REL::Relocation<std::uintptr_t> multi{RE::VTABLE_NiMultiTargetTransformController[0]};
     REL::Relocation<std::uintptr_t> gen{RE::VTABLE_BGSGamebryoSequenceGenerator[0]};
     const auto m=*reinterpret_cast<std::uintptr_t*>(multi.address()+0x27*8);
@@ -356,7 +359,7 @@ WingPlayback WingRuntime::prepare(WingMatch match){
                 diagnostic::report("binding.character-missing","skip wing model",root,match.profile->id);continue;}
             {std::lock_guard guard(registryMutex);controllers[controller]=s;for(auto c:s->characters)characters[c]=s;}
             impl_->states.push_back(s);
-            SKSE::log::info("Runtime wing bound: root={} privateSamplers={} tracks={} durations={:.4f}/{:.4f}/{:.4f}; NIF keys/manager/graph unchanged",
+            SKSE::log::debug("Runtime wing bound: root={} privateSamplers={} tracks={} durations={:.4f}/{:.4f}/{:.4f}; NIF keys/manager/graph unchanged",
                 root->name.c_str(),clones.size(),s->tracks.size(),s->clocks[0].duration,s->clocks[1].duration,s->clocks[2].duration);
         }
         std::lock_guard lock(s->mutex);out.found=true;out.active=out.gliding=out.spreadActive=s->applied>0;

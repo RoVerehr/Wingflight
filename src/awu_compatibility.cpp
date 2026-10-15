@@ -46,7 +46,7 @@ public:
             found->second.pending=false;found->second.ready=accepted;
             if(accepted)found->second.suspended=suspend;
             found->second.retry=accepted?0:30;
-            SKSE::log::info("AWU independent input handoff completed: effect={} accepted={} suspended={}; jump/damage settings untouched",id,accepted,suspend);
+            SKSE::log::debug("AWU independent input handoff completed: effect={} accepted={} suspended={}; jump/damage settings untouched",id,accepted,suspend);
         });
     }
     void SetObject(const RE::BSTSmartPointer<RE::BSScript::Object>&) override{}

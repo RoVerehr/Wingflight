@@ -10,7 +10,7 @@ inline bool timedFallClip(std::string_view name) {
         || name=="Levitate_JumpFall" || name=="Levitate_JumpFall.hkx";
 }
 // Hold the native falling pose before its end-relative landing trigger. Only the
-// selected player's external held glide calls this; do not rewind or loop a
+// selected player's held glide or owned NPC descent calls this; do not rewind or loop a
 // single-play animation, edit shared trigger data, or intercept physical landings.
 inline float glideClipStep(float dt,float time,float duration,float speed,float eventOffset) {
     if (!std::isfinite(dt)||dt<=0 || !std::isfinite(time)||time<0

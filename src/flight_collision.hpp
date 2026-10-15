@@ -64,12 +64,12 @@ public:
             float damage=result.hits[i].damage;
             for(std::size_t j=i+1;j<result.count;++j)if(actors[j].get()==actors[i].get())damage=std::max(damage,result.hits[j].damage);
             const bool applied=actors[i]->DoDamage(damage,player,false);
-            SKSE::log::info("Flight collision actor: target={:08X} requestedDamage={:.2f} nativeResult={}",actors[i]->GetFormID(),damage,applied);
+            SKSE::log::debug("Flight collision actor: target={:08X} requestedDamage={:.2f} nativeResult={}",actors[i]->GetFormID(),damage,applied);
         }
         if(!player->IsDead()){
             const float before=player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
             const bool applied=player->DoDamage(result.playerDamage,nullptr,false);
-            SKSE::log::info("Flight collision player: contacts={} requestedDamage={:.2f} multiplier={:.2f} threshold={:.2f} healthBefore={:.2f} healthAfter={:.2f} nativeResult={}",
+            SKSE::log::debug("Flight collision player: contacts={} requestedDamage={:.2f} multiplier={:.2f} threshold={:.2f} healthBefore={:.2f} healthAfter={:.2f} nativeResult={}",
                 result.count,result.playerDamage,settings.multiplier,settings.minSpeed,before,player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth),applied);
         }
         playFlightCollisionSound(player);

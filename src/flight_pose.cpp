@@ -1,10 +1,12 @@
 #include "flight_pose.hpp"
+#include "logging.hpp"
 #include "flight_pose_policy.hpp"
 #include "body_callsite.hpp"
 #include "runtime_support.hpp"
 #include "runtime_callable.hpp"
 #include "lower_body_policy.hpp"
 #include "OpenAnimationReplacerAPI-Animations.h"
+#include "actor_flight.hpp"
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
@@ -38,8 +40,11 @@ std::uint16_t slotIndex(RE::hkbCharacterStringData* data,unsigned mode=0){
     const auto it=registrations.find(data);
     return it!=registrations.end()&&mode<3?it->second.indices[mode]:0xffff;
 }
-bool selected(const RE::hkbContext& c){if(c.character)for(auto& p:characters)if(p.load()==c.character)return true;return false;}
-bool eligible(const RE::hkbContext& c){return selected(c)&&gate&&gate(RE::PlayerCharacter::GetSingleton());}
+bool selected(const RE::hkbContext& c){if(c.character)for(auto& p:characters)if(p.load()==c.character)return true;return actorFlightPoseSelected(c.character);}
+bool eligible(const RE::hkbContext& c){
+    if(actorFlightPoseSelected(c.character))return actorFlightPoseEligible(c.character);
+    return selected(c)&&gate&&gate(RE::PlayerCharacter::GetSingleton());
+}
 pose::TransitionTiming transitionTiming;
 // Owned here so corresponding source does not depend on private CommonLib
 // additions. Havok 2010's blending transition layout is the same in SE/AE.
@@ -65,14 +70,14 @@ std::string_view nodeName(const RE::hkbNode* node){return node&&node->name.c_str
 struct NativeTransitionActivate {
     static void thunk(FlightTransition* effect,const RE::hkbContext& context){
         // Transition templates can be shared between characters. Only edit the
-        // player's runtime clone, and never change on-disk behavior resources.
+        // owned actor's runtime clone, and never change on-disk behavior resources.
         if(effect&&eligible(context)){
             const float seconds=pose::transitionSeconds(nodeName(effect),nodeName(effect->fromGenerator),nodeName(effect->toGenerator),transitionTiming);
             if(seconds>0&&effect->cloneState==RE::hkbNode::CloneState::kClone&&std::isfinite(effect->duration)&&effect->duration>=0){
                 std::lock_guard guard(transitionLock);
-                if(transitions.size()<256){
+                if(transitions.size()<1024){
                     transitions[effect]={context.character,effect->duration,seconds};
-                    if(transitionSamples.fetch_add(1)<32)SKSE::log::info("Flight native blend: effect={} from={} to={} seconds={:.3f}->{:.3f}",nodeName(effect),nodeName(effect->fromGenerator),nodeName(effect->toGenerator),effect->duration,seconds);
+                    if(logging::detailed()&&transitionSamples.fetch_add(1)<32)SKSE::log::debug("Flight native blend: effect={} from={} to={} seconds={:.3f}->{:.3f}",nodeName(effect),nodeName(effect->fromGenerator),nodeName(effect->toGenerator),effect->duration,seconds);
                     if(effect->duration>0&&effect->timeRemaining>0){
                         const float ratio=seconds/effect->duration;
                         effect->timeRemaining*=ratio;effect->timeInTransition*=ratio;
@@ -80,7 +85,7 @@ struct NativeTransitionActivate {
                     effect->duration=seconds;
                 }else SKSE::log::warn("Flight native blend skipped: transition tracking capacity reached");
             }else if((seconds>0||nodeName(effect)=="SprintSyncBlendTransition")&&transitionSkipSamples.fetch_add(1)<12)
-                SKSE::log::warn("Flight native blend kept original timing: effect={} from={} to={} clone={} duration={}; expected player runtime clone and recognized native locomotion pair",nodeName(effect),nodeName(effect->fromGenerator),nodeName(effect->toGenerator),static_cast<unsigned>(effect->cloneState.get()),effect->duration);
+                SKSE::log::warn("Flight native blend kept original timing: effect={} from={} to={} clone={} duration={}; expected owned actor runtime clone and recognized native locomotion pair",nodeName(effect),nodeName(effect->fromGenerator),nodeName(effect->toGenerator),static_cast<unsigned>(effect->cloneState.get()),effect->duration);
         }
         original(effect,context);
     }
@@ -135,7 +140,7 @@ void installNativeTransitions(){
     NativeTransitionActivate::original=table.write_vfunc(4,NativeTransitionActivate::thunk);
     NativeTransitionUpdate::original=table.write_vfunc(5,NativeTransitionUpdate::thunk);
     NativeTransitionDeactivate::original=table.write_vfunc(7,NativeTransitionDeactivate::thunk);
-    SKSE::log::info("Flight native transition hooks installed: player unarmed flight clones only; existing hooks chained");
+    SKSE::log::info("Flight native transition hooks installed: owned player/NPC unarmed flight clones only; existing hooks chained");
 }
 void load(RE::hkbCharacterStringData* data,RE::hkbAnimationBindingSet* bindings,void* assets,RE::hkbBehaviorGraph* graph,const char* path,RE::BSTHashMap<RE::BSFixedString,std::uint32_t>* events){
     if(data&&path&&pose::project(legs::canonical(path))){
@@ -148,7 +153,7 @@ void load(RE::hkbCharacterStringData* data,RE::hkbAnimationBindingSet* bindings,
                 for(unsigned mode=0;mode<3;++mode){
                     record.indices[mode]=static_cast<std::uint16_t>(data->animationNames.size());
                     data->animationNames.push_back(pose::slots[mode].data());
-                    SKSE::log::info("Single-file flight pose registered before OAR: project={} slot={} name={}",path,record.indices[mode],pose::slots[mode]);
+                    SKSE::log::debug("Single-file flight pose registered before OAR: project={} slot={} name={}",path,record.indices[mode],pose::slots[mode]);
                 }
                 it=registrations.emplace(data,std::move(record)).first;
             }
@@ -234,8 +239,8 @@ bool currentPoseBinding(RE::hkbClipGenerator* p,const RE::hkbContext& c,unsigned
                 SKSE::log::warn("Flight pose cached binding differs: slot={} index={} bound={:X} expected={:X}; reactivate through native/OAR chain",pose::slots[mode],index,reinterpret_cast<std::uintptr_t>(p->binding),reinterpret_cast<std::uintptr_t>(expected));
         }
     }
-    if(accepted&&sharedBindingSamples.fetch_add(1)<16)
-        SKSE::log::info("Flight pose OAR shared binding retained: index={} physical={} logical={} (deduplicated animation is valid)",p->animationBindingIndex,physical,logical);
+    if(logging::detailed()&&accepted&&sharedBindingSamples.fetch_add(1)<16)
+        SKSE::log::debug("Flight pose OAR shared binding retained: index={} physical={} logical={} (deduplicated animation is valid)",p->animationBindingIndex,physical,logical);
     return accepted;
 }
 }
@@ -335,7 +340,7 @@ void beforeFlightPoseActivate(RE::hkbClipGenerator* p,const RE::hkbContext& c){
     auto path=legs::canonical(p->animationName.c_str());
     if(!wanted)return;
     auto data=strings(c);const auto target=slotIndex(data,mode);if(target==0xffff)return;
-    if(saved.size()>=256){SKSE::log::error("Single-file flight pose: backup capacity reached; clip={} entries={}",p->name.c_str(),saved.size());return;}
+    if(saved.size()>=4096){SKSE::log::error("Single-file flight pose: backup capacity reached; clip={} entries={}",p->name.c_str(),saved.size());return;}
     auto native=p->animationBindingIndex;
     for(std::uint32_t i=0;i<static_cast<unsigned>(data->animationNames.size())&&i<0xffff;++i)
         if(data->animationNames[i].c_str()&&legs::canonical(data->animationNames[i].c_str())==path){native=static_cast<std::uint16_t>(i);break;}
@@ -344,7 +349,7 @@ void beforeFlightPoseActivate(RE::hkbClipGenerator* p,const RE::hkbContext& c){
     p->animationName=pose::slots[mode].data();p->animationBindingIndex=target;
     p->cropStartAmountLocalTime=p->cropEndAmountLocalTime=p->startTime=p->enforcedDuration=0;p->playbackSpeed=1;p->mode=RE::hkbClipGenerator::kModeLooping;
     p->triggers=nullptr;p->originalTriggers=nullptr;
-    if(samples.fetch_add(1)<24)SKSE::log::info("Native flight pose entry: {} -> {} (native graph transitions; OAR conditional replacements)",path,pose::slots[mode]);
+    if(logging::detailed()&&samples.fetch_add(1)<24)SKSE::log::debug("Native flight pose entry: {} -> {} (native graph transitions; OAR conditional replacements)",path,pose::slots[mode]);
 }
 void afterFlightPoseActivate(RE::hkbClipGenerator* p,const RE::hkbContext& c){
     if(!p||outgoingCopy(p,c))return;
@@ -353,8 +358,8 @@ void afterFlightPoseActivate(RE::hkbClipGenerator* p,const RE::hkbContext& c){
         // Locomotion's timed landing/sprint triggers cannot end an owned flight loop.
         // Combat generators never enter this route.
         p->triggers=nullptr;p->originalTriggers=nullptr;
-        if(activatedPoseSamples.fetch_add(1)<32)
-            SKSE::log::info("Flight pose activated: clip={} mode={} index={} path={} graphOwned={} marker={:X} binding={:X}",
+        if(logging::detailed()&&activatedPoseSamples.fetch_add(1)<32)
+            SKSE::log::debug("Flight pose activated: clip={} mode={} index={} path={} graphOwned={} marker={:X} binding={:X}",
                 p->name.c_str(),pose::modes[it->second.modeIndex],p->animationBindingIndex,playing(p,c),graphOwnsClip(p,c),p->userData,reinterpret_cast<std::uintptr_t>(p->binding));
     }
 }
@@ -369,14 +374,16 @@ void afterFlightPoseDeactivate(RE::hkbClipGenerator* p,const RE::hkbContext& c){
 void updateFlightPose(RE::hkbClipGenerator* p,const RE::hkbContext& c){
     if(!p||!p->animationName.c_str()||outgoingCopy(p,c))return;
     const bool want=eligible(c);bool aliased{},motion{};
-    {std::lock_guard guard(lock);if(auto it=saved.find(p);it!=saved.end()&&same(it->second,p,c)){aliased=true;motion=true;}else motion=pose::nativeMode(legs::canonical(p->animationName.c_str()))>=0;}
+    {std::lock_guard guard(lock);if(auto it=saved.find(p);it!=saved.end()&&same(it->second,p,c)){
+        aliased=true;motion=true;
+    }else motion=pose::nativeMode(legs::canonical(p->animationName.c_str()))>=0;}
     if(!motion||(!aliased&&!selected(c))||!p->animationControl)return;
     // Only attach/detach the flight binding when ownership changes (takeoff,
     // drawing a weapon, landing). Never restart clips for a body-pose change:
     // idle/run/sprint nodes and OAR own both sides of their transitions.
     if(aliased!=want){
-        if(bindingRepairSamples.fetch_add(1)<32)
-            SKSE::log::info("Flight pose ownership changed: clip={} wanted={} index={} graphOwned={} marker={:X}",p->name.c_str(),want,p->animationBindingIndex,graphOwnsClip(p,c),p->userData);
+        if(logging::detailed()&&bindingRepairSamples.fetch_add(1)<32)
+            SKSE::log::debug("Flight pose ownership changed: clip={} wanted={} index={} graphOwned={} marker={:X}",p->name.c_str(),want,p->animationBindingIndex,graphOwnsClip(p,c),p->userData);
         p->Deactivate(c);p->Activate(c);
     }
 }

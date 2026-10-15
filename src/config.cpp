@@ -39,11 +39,16 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
         return static_cast<unsigned>(value);
     };
     cfg.enabled = integer("General", "Enabled", 1, 1) != 0;
+    cfg.actors.enabled=integer("NPCFlight","Enabled",1,1)!=0;
+    cfg.actors.airCombat=integer("NPCFlight","AirCombat",1,1)!=0;
+    cfg.actors.maxActors=integer("NPCFlight","MaxActors",32,64);
+    if(cfg.actors.maxActors==0)throw std::runtime_error("NPCFlight/MaxActors must be 1..64");
+    cfg.actors.followDistance=number(file,"NPCFlight","FollowDistance",200,70,2000);
     cfg.collision.enabled=integer("Collision","Enabled",1,1)!=0;
     cfg.collision.damageActors=integer("Collision","DamageActors",1,1)!=0;
     cfg.awuCompatibility=integer("Compatibility","AWU",1,1)!=0;
     cfg.glideEnabled=integer("Glide","Enabled",1,1)!=0;
-    cfg.logSamples = integer("General", "DiagnosticSamples", 1, 1) != 0;
+    cfg.logSamples = integer("General", "DetailedLogging", 0, 1) != 0;
     cfg.lowerBodyEnabled=integer("LowerBody","Enabled",1,1)!=0;
     cfg.lowerBodyLogClips=integer("LowerBody","LogAnimations",1,1)!=0;
     cfg.lowerBodyBlendIn=number(file,"LowerBody","BlendInSeconds",0.30f,0.05f,2);

@@ -47,7 +47,7 @@ public:
             lease_.set(*api_,SKSE::GetPluginHandle(),facingYaw(player->GetAngleZ(),desiredYaw,dt,response));
         }
         if(previous!=lease_.last || wasOwned!=lease_.owned) {
-            SKSE::log::info("TDM flight facing: owned={} result={}",lease_.owned,static_cast<unsigned>(lease_.last));
+            SKSE::log::debug("TDM flight facing: owned={} result={}",lease_.owned,static_cast<unsigned>(lease_.last));
         }
     }
 private:

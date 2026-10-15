@@ -1,6 +1,8 @@
-# Wingflight 0.3.14
+# Wingflight 0.4.0
 
 Wingflight adds flight with collisions, manual wingbeats and automatic hovering to Skyrim.
+
+Winged NPCs and followers can follow the player in flight and fight using their native combat AI. NPC flight, follow distance and air combat can be changed in the control panel. NPC stamina use is not managed by Wingflight.
 
 Default flight poses use the separately installed Flying Animations - Resource (FAR). Custom poses can be selected through Open Animation Replacer (OAR).
 

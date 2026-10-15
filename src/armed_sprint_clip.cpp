@@ -1,4 +1,5 @@
 #include "armed_sprint_clip.hpp"
+#include "logging.hpp"
 #include "armed_sprint_clip_policy.hpp"
 #include "lower_body_policy.hpp"
 #include <SKSE/SKSE.h>
@@ -89,8 +90,8 @@ void prepareArmedSprintIdle(RE::PlayerCharacter* player,bool fullFlight){
                 const bool body=thirdPersonIdleProject(project,hasBodyIdle,false,false);
                 if(body)characters[i++]=character;
                 {std::lock_guard indexGuard(indexLock);
-                    if(loggedProjects.size()<16&&loggedProjects.insert(project).second)
-                        SKSE::log::info("Armed sprint idle project: project={} bodyIdle={} selected={}",project,hasBodyIdle,body);}
+                    if(logging::detailed()&&loggedProjects.size()<16&&loggedProjects.insert(project).second)
+                        SKSE::log::debug("Armed sprint idle project: project={} bodyIdle={} selected={}",project,hasBodyIdle,body);}
             }
         }
     }
@@ -133,17 +134,17 @@ void beforeArmedSprintActivate(RE::hkbClipGenerator* clip,const RE::hkbContext& 
     clip->playbackSpeed=1;clip->mode=RE::hkbClipGenerator::kModeLooping;
     // Our Activate wrapper runs BEFORE the existing OAR wrapper. Its ActiveClip
     // records the idle index, then chooses the user's idle replacement normally.
-    if(samples.fetch_add(1)<32)SKSE::log::info("Armed sprint idle slot: {} -> {} (native sprint branch retained)",path,idle);
+    if(logging::detailed()&&samples.fetch_add(1)<32)SKSE::log::debug("Armed sprint idle slot: {} -> {} (native sprint branch retained)",path,idle);
 }
 void afterArmedSprintActivate(RE::hkbClipGenerator* clip,const RE::hkbContext& c){
     if(!clip||clip->userData==0xC)return;
     std::uint16_t idleIndex{};
     {std::lock_guard lock(clipLock);const auto it=saved.find(clip);
         if(it==saved.end()||!same(it->second,clip,c))return;idleIndex=it->second.idleIndex;}
-    if(activationSamples.fetch_add(1)>=32)return;
+    if(!logging::detailed()||activationSamples.fetch_add(1)>=32)return;
     const auto data=stringData(c);const auto playing=clip->animationBindingIndex;
     const auto name=data&&playing<data->animationNames.size()?data->animationNames[playing].c_str():nullptr;
-    SKSE::log::info("Armed sprint idle activation: idleIndex={} playingIndex={} playing={}",idleIndex,playing,name?name:"<unavailable>");
+    SKSE::log::debug("Armed sprint idle activation: idleIndex={} playingIndex={} playing={}",idleIndex,playing,name?name:"<unavailable>");
 }
 void afterArmedSprintDeactivate(RE::hkbClipGenerator* clip,const RE::hkbContext& c){
     if(!clip||clip->userData==0xC)return;
@@ -170,7 +171,7 @@ void updateArmedSprintIdle(RE::hkbClipGenerator* clip,const RE::hkbContext& c){
     const auto playing=desired&&alias?bindingPath(clip,c):std::string{};
     const bool repair=repairSprintBinding(desired,alias,idleSlotBinding(playing,idle),clip->animationControl!=nullptr,false);
     if(!repair&&!restartSprintClip(alias,desired,clip->animationControl!=nullptr,false))return;
-    if(repair&&repairSamples.fetch_add(1)<16)SKSE::log::info("Armed sprint idle: rebinding inherited ground/OAR selection {} to {}",playing,idle);
+    if(logging::detailed()&&repair&&repairSamples.fetch_add(1)<16)SKSE::log::debug("Armed sprint idle: rebinding inherited ground/OAR selection {} to {}",playing,idle);
     // Weapon drawing/sheathing or C can change ownership while this sprint clip
     // remains active. Rebind only that clip; keep the state machine and all input
     // events. OAR uses the same Deactivate/Activate lifetime when replacing clips.

@@ -4,6 +4,7 @@
 #include "body_motion.hpp"
 #include "leg_secondary_motion.hpp"
 #include "collision_policy.hpp"
+#include "actor_flight_policy.hpp"
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@ struct WingProfile {
     WingTiming timing;
 };
 struct Configuration {
+    aerial::Settings actors;
     impact::Settings collision;
     Tuning tuning;
     HoverTiming hoverTiming;
@@ -42,7 +44,7 @@ struct Configuration {
     float jumpWingOverOpenPercent{35},jumpWingOpenSeconds{.22f},jumpWingSettleSeconds{.43f};
     float jumpWingFlutterPeriod{1.6f},jumpWingFlutterAmplitude{1};
     float spreadAmplitudeMultiplier{1};
-    bool enabled{true}, logSamples{true}, poseWhenArmed{true},faceFlight{true};
+    bool enabled{true}, logSamples{false}, poseWhenArmed{true},faceFlight{true};
     bool awuCompatibility{true};
     bool glideEnabled{true};
     bool lowerBodyEnabled{true},lowerBodyLogClips{true};

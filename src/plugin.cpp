@@ -37,6 +37,8 @@
 #include "flight_collision.hpp"
 #include "held_wings.hpp"
 #include "jump_wing_preview.hpp"
+#include "actor_flight.hpp"
+#include "logging.hpp"
 
 namespace {
 using namespace wingflight;
@@ -233,7 +235,7 @@ void updateMenuPause(float delta) {
     const bool suspended=menuFlightPause.update(delta,ready&&loaded&&flight.active(),uiMenuOpen(),transition,gameplayReady);
     const bool previous=flightMenuSuspended.exchange(suspended);
     if(previous!=suspended&&flight.active())
-        SKSE::log::info("Flight menu handoff: suspended={} camera={} movementEnabled={}",suspended,
+        SKSE::log::debug("Flight menu handoff: suspended={} camera={} movementEnabled={}",suspended,
             camera&&camera->currentState?static_cast<int>(camera->currentState->id):-1,
             controls&&controls->IsMovementControlsEnabled());
 }
@@ -320,8 +322,8 @@ struct AirborneExitEvents : RE::BSTEventSink<RE::BSAnimationGraphEvent> {
             observe=ours&&window.owns(controller!=nullptr,!controller||supported(controller),
                 reinterpret_cast<std::uintptr_t>(controller))&&(tag.starts_with("Foot")||tag.starts_with("JumpLand"));
         }
-        if(observe&&samples.fetch_add(1)<24)SKSE::log::info("Airborne exit graph event: {} suppressed={} supported=false",event->tag.c_str(),block);
-        else if(block&&samples.fetch_add(1)<48)SKSE::log::info("Suppressed airborne foot audio: tag={} payload={}",event->tag.c_str(),event->payload.c_str()?event->payload.c_str():"");
+        if(observe&&samples.fetch_add(1)<24)SKSE::log::debug("Airborne exit graph event: {} suppressed={} supported=false",event->tag.c_str(),block);
+        else if(block&&samples.fetch_add(1)<48)SKSE::log::debug("Suppressed airborne foot audio: tag={} payload={}",event->tag.c_str(),event->payload.c_str()?event->payload.c_str():"");
         if(!block)return RE::BSEventNotifyControl::kContinue;
         return RE::BSEventNotifyControl::kStop;
     }
@@ -350,7 +352,7 @@ void finish(RE::PlayerCharacter* player, WingMatch match, const char* reason, bo
     jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
     flightCollision.reset();
     if (flight.active() || !lastProfile.empty()) {
-        SKSE::log::info("Flight ended: {}", reason);
+        SKSE::log::debug("Flight ended: {}", reason);
     }
     // Register the cosmetic guard before publishing the pose change or JumpFall.
     // Keep native gravity, falling state messages and damage completely native.
@@ -452,10 +454,10 @@ void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool gli
     const char* bodyEvent=usesVampireLordBehavior(player)?"JumpStandingEnd":"JumpLandEnd";
     const bool bodyAccepted = !glideOnly && player->NotifyAnimationGraph(RE::BSFixedString(bodyEvent));
     bodyRetry = 0.25f;
-    SKSE::log::info("Flight body handoff {} accepted={} armedPoses={}",bodyEvent, bodyAccepted, config.poseWhenArmed&&!usesVampireLordBehavior(player));
+    SKSE::log::debug("Flight body handoff {} accepted={} armedPoses={}",bodyEvent, bodyAccepted, config.poseWhenArmed&&!usesVampireLordBehavior(player));
     wingRetry = 0.20f; // Private graph blends into the raised-wing pose first.
     if(!glideOnly)RE::SendHUDMessage::ShowHUDMessage(flight.continuousFlight()?"Wingflight: continuous flight":modeName(flight.mode()));
-    SKSE::log::info("Flight started adapter={} restored={} glideOnly={} runtime={} body={} wingBackend={} continuousFlight={}", lastProfile, restoring,glideOnly,runtimeName(),usesVampireLordBehavior(player)?"VampireLord":"Character",match.profile->animationless?"logical invisible":match.profile->continuousFlight?"provider loop":match.profile->nativeVampire?"skeletal":"effect ART",flight.continuousFlight());
+    SKSE::log::debug("Flight started adapter={} restored={} glideOnly={} runtime={} body={} wingBackend={} continuousFlight={}", lastProfile, restoring,glideOnly,runtimeName(),usesVampireLordBehavior(player)?"VampireLord":"Character",match.profile->animationless?"logical invisible":match.profile->continuousFlight?"provider loop":match.profile->nativeVampire?"skeletal":"effect ART",flight.continuousFlight());
 }
 void update(RE::PlayerCharacter* player, float delta) {
     if (!ready || !loaded || !player) { return; }
@@ -534,7 +536,7 @@ void update(RE::PlayerCharacter* player, float delta) {
     const float dt = std::min(delta, 0.1f);
     if(nativeTravel){
         flightCollision.reset();
-        if(!nativeTravelWasPaused)SKSE::log::info("Native Vampire Lord bat travel: yielding velocity, controller state, facing and wing pose to the original skill");
+        if(!nativeTravelWasPaused)SKSE::log::debug("Native Vampire Lord bat travel: yielding velocity, controller state, facing and wing pose to the original skill");
         nativeTravelWasPaused=true;flightFacing.release();flightBankTurn=0;clearInput();
         lastCell=player->GetParentCell();lastPosition=player->GetPosition();lastWorld=player->GetWorldspace();
         lastInterior=lastCell&&lastCell->IsInteriorCell();
@@ -546,10 +548,10 @@ void update(RE::PlayerCharacter* player, float delta) {
         const auto height=player->GetPosition().z/RE::bhkWorld::GetWorldScaleInverse();
         if(!flight.resumeAfterNativeTravel(height)){finish(player,match,"invalid bat-travel destination");return;}
         wingMotion.reset();wingEntry.reset();ceilingTimer=0;bodyRetry=0.5f;
-        SKSE::log::info("Native Vampire Lord bat travel: resumed existing mode={} at actual destination Z={:.2f}",static_cast<int>(flight.mode()),player->GetPosition().z);
+        SKSE::log::debug("Native Vampire Lord bat travel: resumed existing mode={} at actual destination Z={:.2f}",static_cast<int>(flight.mode()),player->GetPosition().z);
     }
     if(wasActive&&(lastProfile!=match.profile->id||visualEffect!=match.effect||visualActorRoot!=player->Get3D(false))){
-        SKSE::log::info("Flight wing provider rebind: previous={} next={} body={} backend={}; saved ordinary mode preference retained",lastProfile,match.profile->id,usesVampireLordBehavior(player)?"VampireLord":"Character",match.profile->animationless?"logical invisible":match.profile->continuousFlight?"provider loop":match.profile->nativeVampire?"skeletal":"effect ART");
+        SKSE::log::debug("Flight wing provider rebind: previous={} next={} body={} backend={}; saved ordinary mode preference retained",lastProfile,match.profile->id,usesVampireLordBehavior(player)?"VampireLord":"Character",match.profile->animationless?"logical invisible":match.profile->continuousFlight?"provider loop":match.profile->nativeVampire?"skeletal":"effect ART");
         wings.clearVisual();lastEvent.clear();wingMotion.reset();if(!flight.glideOnly()&&!match.profile->continuousFlight)wingMotion.pulse(false);
         wingBlend.reset();fastBlend.reset(0);wingEntry.reset();blendTarget=true;blendTrace=0.8f;blendSample=0;blendMissingReported=false;
         visualEffect=match.effect;lastProfile=match.profile->id;visualActorRoot=player->Get3D(false);wingRetry=0;
@@ -694,11 +696,11 @@ void update(RE::PlayerCharacter* player, float delta) {
     }
     if(result.automaticFlapped){
         wingMotion.automaticPulse(config.tuning.autoFlapCost);
-        if(config.logSamples)SKSE::log::info("Automatic hover beat: baseZ={:.2f} heightZ={:.2f} nativeVz={:.3f} gravity={:.3f} impulse={:.3f} cost={:.2f}",
+        if(config.logSamples)SKSE::log::debug("Automatic hover beat: baseZ={:.2f} heightZ={:.2f} nativeVz={:.3f} gravity={:.3f} impulse={:.3f} cost={:.2f}",
             flight.hoverTarget()*RE::bhkWorld::GetWorldScaleInverse(),position.z,observedVelocity.z,config.tuning.gravity,config.tuning.autoFlapImpulse,config.tuning.autoFlapCost);
     }
     if (result.highSpeedEntryFlap) {
-        SKSE::log::info("High-speed entry Space-equivalent beat accepted: multiplier={:.3f} pendingStrokes={} reuseDownstroke={} phase={:.4f} raisedThreshold=0.70",flight.speedMultiplier(),wingMotion.pending(),reusedEntryDownstroke,playback.phase);
+        SKSE::log::debug("High-speed entry Space-equivalent beat accepted: multiplier={:.3f} pendingStrokes={} reuseDownstroke={} phase={:.4f} raisedThreshold=0.70",flight.speedMultiplier(),wingMotion.pending(),reusedEntryDownstroke,playback.phase);
     }
     // A visual-only credit repeats the large stroke in native high-speed flight.
     // It supplies neither impulse nor stamina payment/extra speed. Space still
@@ -720,13 +722,13 @@ void update(RE::PlayerCharacter* player, float delta) {
             flight.rejectAutomaticStroke(config.tuning);continuous=flight.automaticHover();wingMotion.setHover(continuous);
             RE::SendHUDMessage::ShowHUDMessage(modeName(flight.mode()));
         }
-        if(config.logSamples&&(charge.cost>0||!paid))SKSE::log::info("Downstroke stamina: type={} phase={:.4f} cost={:.2f} paid={} staminaBefore={:.2f}",
+        if(config.logSamples&&(charge.cost>0||!paid))SKSE::log::debug("Downstroke stamina: type={} phase={:.4f} cost={:.2f} paid={} staminaBefore={:.2f}",
             charge.kind==WingMotion::Credit::automatic?"automatic":"manual",playback.phase,charge.cost,paid,stamina);
     }
     flight.applyWingLift(wingMotion.liftFraction(),wingMotion.liftStartsStroke(),config.tuning);
     flight.applyWingLift(wingMotion.automaticLiftFraction(),wingMotion.automaticLiftStartsStroke(),config.tuning,true);
     if (!continuous && wingMotion.liftStartsStroke() && config.logSamples) {
-        SKSE::log::info("Wing lift begins: phase={:.4f} visible={:.4f} fraction={:.4f} velocityZ={:.3f}",
+        SKSE::log::debug("Wing lift begins: phase={:.4f} visible={:.4f} fraction={:.4f} velocityZ={:.3f}",
             playback.phase,playback.flapWeight,wingMotion.liftFraction(),flight.velocity().z);
     }
     wingEntry.update(dt,playback.active && playback.gliding && playback.spreadActive,std::min(match.profile->timing.expandSeconds,0.40f));
@@ -736,7 +738,7 @@ void update(RE::PlayerCharacter* player, float delta) {
 
     if (wantsFlap!=blendTarget) {
         blendTarget=wantsFlap; blendTrace=0.8f; blendSample=0;
-        SKSE::log::info("Wing blend target={} startWeight={:.4f}", wantsFlap?"flap":"glide",wingBlend.value());
+        SKSE::log::debug("Wing blend target={} startWeight={:.4f}", wantsFlap?"flap":"glide",wingBlend.value());
     }
     // The two private Gamebryo generators remain active. Only their shared
     // percentage changes, including when Space reverses an unfinished blend.
@@ -757,11 +759,11 @@ void update(RE::PlayerCharacter* player, float delta) {
         blendTrace-=dt; blendSample-=dt;
         if (blendSample<=0) {
             blendSample=0.05f;
-            SKSE::log::info("Wing blend trace: modeFlap={:.4f} entry={:.4f} observedGraph={:.4f} NiFlap={:.4f} NiFast={:.4f} NiSpread={:.4f} otherWeight={:.4f} active={}/{} phase={:.3f} rate={:.3f} written={} sequences={}",
+            SKSE::log::debug("Wing blend trace: modeFlap={:.4f} entry={:.4f} observedGraph={:.4f} NiFlap={:.4f} NiFast={:.4f} NiSpread={:.4f} otherWeight={:.4f} active={}/{} phase={:.3f} rate={:.3f} written={} sequences={}",
                 wingBlend.value(),wingEntry.value(),playback.graphWeight,playback.flapWeight,playback.glideWeight,playback.spreadWeight,playback.otherWeight,
                 playback.active,playback.gliding,playback.phase,playback.frequency,blendWritten,playback.activeSequence);
-            SKSE::log::info("Wing fast-flap phase={:.4f} configuredEntry={:.4f} rate={:.4f} hover={}",playback.glidePhase,match.profile->timing.glideEntryPhase,playback.glideFrequency,continuous);
-            if(match.profile->nativeVampire)SKSE::log::info("Native Vampire Lord animation: largeSprintLoop={} flutterPhase={:.3f} flutterRate={:.3f} flutterWeight={:.3f}",nativeSprintLoop,playback.spreadPhase,playback.spreadFrequency,playback.spreadWeight);
+            SKSE::log::debug("Wing fast-flap phase={:.4f} configuredEntry={:.4f} rate={:.4f} hover={}",playback.glidePhase,match.profile->timing.glideEntryPhase,playback.glideFrequency,continuous);
+            if(match.profile->nativeVampire)SKSE::log::debug("Native Vampire Lord animation: largeSprintLoop={} flutterPhase={:.3f} flutterRate={:.3f} flutterWeight={:.3f}",nativeSprintLoop,playback.spreadPhase,playback.spreadFrequency,playback.spreadWeight);
         }
     }
     const auto& event = continuous ? match.profile->hover : wingMotion.wantsFlap() ? match.profile->flap : match.profile->glide;
@@ -782,7 +784,7 @@ void update(RE::PlayerCharacter* player, float delta) {
     player->GetGraphVariableBool("bInJumpState", inJump);
     if (flight.flying() && inJump && bodyRetry <= 0 && !player->IsAttacking()) {
         const bool accepted = player->NotifyAnimationGraph(RE::BSFixedString(usesVampireLordBehavior(player)?"JumpStandingEnd":"JumpLandEnd"));
-        SKSE::log::info("Recovered native jump pose during flight: accepted={}", accepted);
+        SKSE::log::debug("Recovered native jump pose during flight: accepted={}", accepted);
         bodyRetry = 0.5f;
     }
     auto target = flight.velocity();
@@ -811,11 +813,11 @@ void update(RE::PlayerCharacter* player, float delta) {
     sampleTimer += dt;
     if (config.logSamples && sampleTimer >= 2.0f) {
         sampleTimer = 0;
-        SKSE::log::info("Flight motion: sprintHeld={} sprintActive={} flapMultiplier={:.3f} horizontalMultiplier={:.3f} hover={} hoverBaseZ={:.2f} hoverOffsetZ={:.2f} forwardPose={} glideRate={:.3f} facingOwned={} actorYaw={:.3f} cameraYaw={:.3f} armedLeanCOM={:.2f} flightBank={:.2f} pathPitch={:.2f} pitchOverlay={:.2f}",
+        SKSE::log::debug("Flight motion: sprintHeld={} sprintActive={} flapMultiplier={:.3f} horizontalMultiplier={:.3f} hover={} hoverBaseZ={:.2f} hoverOffsetZ={:.2f} forwardPose={} glideRate={:.3f} facingOwned={} actorYaw={:.3f} cameraYaw={:.3f} armedLeanCOM={:.2f} flightBank={:.2f} pathPitch={:.2f} pitchOverlay={:.2f}",
             sprintHeld,controls.sprint,flight.speedMultiplier(),flight.horizontalMultiplier(controls.sprint,config.tuning),continuous,flight.hoverTarget()*RE::bhkWorld::GetWorldScaleInverse(),
             flight.hoverExcursion()*RE::bhkWorld::GetWorldScaleInverse(),bodyMotion.forward(),bodyMotion.glideSpeed(),flightFacing.active(),player->GetAngleZ(),controls.yaw,armedSprintLeanAngle(),flightBankAngle(),
             legs::flightPathPitch(target.x,target.y,target.z),flightPitchAngle());
-        SKSE::log::info("Sample profile={} mode={} cmd=({:.2f},{:.2f},{:.2f}) measured=({:.2f},{:.2f},{:.2f}) supported={} flags={:08X} input=({:.2f},{:.2f}) fallStart={:.2f} playerZ={:.2f} health={:.1f}",
+        SKSE::log::debug("Sample profile={} mode={} cmd=({:.2f},{:.2f},{:.2f}) measured=({:.2f},{:.2f},{:.2f}) supported={} flags={:08X} input=({:.2f},{:.2f}) fallStart={:.2f} playerZ={:.2f} health={:.1f}",
             lastProfile, static_cast<int>(flight.mode()), target.x, target.y, target.z,
             observedVelocity.x, observedVelocity.y, observedVelocity.z, supported(controller),
             static_cast<unsigned>(controller->flags.underlying()), controls.right, controls.forward,
@@ -823,11 +825,11 @@ void update(RE::PlayerCharacter* player, float delta) {
         bool graphFly{}, graphPose{};
         player->GetGraphVariableBool("Wingflight_IsFlying", graphFly);
         player->GetGraphVariableBool("Wingflight_UsePose", graphPose);
-        SKSE::log::info("Animation sample: flying={} pose={} inJump={} armed={} attacking={} wingFound={} wingActive={} gliding={} phase={:.3f} rate={:.3f} requestedRate={:.3f} pendingStrokes={} stage={} sequences={}",
+        SKSE::log::debug("Animation sample: flying={} pose={} inJump={} armed={} attacking={} wingFound={} wingActive={} gliding={} phase={:.3f} rate={:.3f} requestedRate={:.3f} pendingStrokes={} stage={} sequences={}",
             graphFly, graphPose, inJump, player->AsActorState()->IsWeaponDrawn(), player->IsAttacking(),
             playback.found, playback.active, playback.gliding, playback.phase, playback.frequency, wingMotion.rate(),
             wingMotion.pending(), static_cast<int>(wingMotion.stroke()), playback.activeSequence);
-        if(continuous)SKSE::log::info("Hover recovery: altitudeRequestIn={:.3f} phase={:.4f} rate={:.4f} pending={}",
+        if(continuous)SKSE::log::debug("Hover recovery: altitudeRequestIn={:.3f} phase={:.4f} rate={:.4f} pending={}",
             flight.automaticRecoverySeconds(timing.upstrokeSeconds,timing.downstrokeSeconds,config.tuning),playback.phase,wingMotion.rate(),wingMotion.pending());
     }
 }
@@ -906,13 +908,15 @@ struct PlayerUpdate {
                 {f[0],f[1],f[2]},{r[0],r[1],r[2]},{observed.x,observed.y,observed.z});
             if(target){
                 controller->SetLinearVelocityImpl(RE::hkVector4((*target)[0],(*target)[1],(*target)[2],0));
-                if(nativeBatVelocitySamples++<3)SKSE::log::info("Native Vampire Lord bat velocity: nativeRequest=({:.3f},{:.3f}) filtered=({:.3f},{:.3f}) applied=({:.3f},{:.3f}); native vertical/collision retained",
+                if(nativeBatVelocitySamples++<3)SKSE::log::debug("Native Vampire Lord bat velocity: nativeRequest=({:.3f},{:.3f}) filtered=({:.3f},{:.3f}) applied=({:.3f},{:.3f}); native vertical/collision retained",
                     r[0],r[1],observed.x,observed.y,(*target)[0],(*target)[1]);
             }else if(!supported(controller))diagnostic::report("vampire.bat-velocity-invalid","retain native filtered velocity",controller,"forward/request/observed vectors");
         }else if(!yielding)nativeBatVelocitySamples=0;
         // Native update may enter/leave the Tween camera during this frame.
         updateMenuPause(0);
         update(actor, delta);
+        updateActorFlightLeader(actor,delta,ready&&loaded&&flight.flying(),menuOpen()||!ready||!loaded,
+            flight.automaticHover()?flight.hoverTarget():std::numeric_limits<float>::quiet_NaN(),flight.highSpeed());
     }
     static inline REL::Relocation<decltype(thunk)> original;
 };
@@ -926,7 +930,7 @@ struct PlayerGraphFilter {
             const auto player=RE::PlayerCharacter::GetSingleton();
             if(player&&holder==static_cast<RE::IAnimationGraphManagerHolder*>(player)
                 &&suppressArmedSprintStart(armedSprintForbidden(player),event.c_str())){
-                if(blockedSprintEvents.fetch_add(1)<16)SKSE::log::info("Armed sprint restriction consumed SprintStart; nativeSprint={}",player->AsActorState()->IsSprinting());
+                if(blockedSprintEvents.fetch_add(1)<16)SKSE::log::debug("Armed sprint restriction consumed SprintStart; nativeSprint={}",player->AsActorState()->IsSprinting());
                 return true;
             }
         }
@@ -936,7 +940,7 @@ struct PlayerGraphFilter {
             if (player && holder == static_cast<RE::IAnimationGraphManagerHolder*>(player)
                 && actorGraphSafe(player) && player->GetCharController() && !supported(player->GetCharController())) {
                 if (blockedBodyEvents.fetch_add(1) < 30) {
-                    SKSE::log::info("Suppressed native airborne jump/landing request: {}", event.c_str());
+                    SKSE::log::debug("Suppressed native airborne jump/landing request: {}", event.c_str());
                 }
                 return true;
             }
@@ -969,7 +973,7 @@ struct ArmedIdleChannels {
             // Resume the native animation only for continued full flight (sheathing)
             // or supported ground. C/freefall must keep its falling graph state.
             if(change.resumeSprint)player->NotifyAnimationGraph("SprintStart");
-            SKSE::log::info("Armed sprint restriction released: nativeSprint={} animationResumed={}",nativeSprint,change.resumeSprint);
+            SKSE::log::debug("Armed sprint restriction released: nativeSprint={} animationResumed={}",nativeSprint,change.resumeSprint);
         }
         // The 0.2.10 graph exit also stopped native sprint on later frames.
         // Keep that behavior ONLY for the explicit gameplay restriction.
@@ -977,7 +981,7 @@ struct ArmedIdleChannels {
         if(forbidden)player->SetGraphVariableInt("iSyncSprintState",0);
         if(forbidden&&change.enter){
             const bool sent=player->NotifyAnimationGraph("SprintStop");
-            SKSE::log::info("Armed sprint restriction stop requested: accepted={} nativeSprintBefore={} nativeSprintAfter={}",sent,nativeSprint,player->AsActorState()->IsSprinting());
+            SKSE::log::debug("Armed sprint restriction stop requested: accepted={} nativeSprintBefore={} nativeSprintAfter={}",sent,nativeSprint,player->AsActorState()->IsSprinting());
         }
         if(unarmedPoseEligible(player)){
             float nativeSpeed{};
@@ -999,7 +1003,7 @@ struct ArmedIdleChannels {
         const bool a=player->SetGraphVariableFloat("Speed",0.0f);
         const bool b=player->SetGraphVariableFloat("SpeedSampled",0.0f);
         if(report&&samples.fetch_add(1)<12)
-            SKSE::log::info("Armed idle channels: Speed={:.3f}->0 written={} SpeedSampled={:.3f}->0 written={} nativeSprint={}",
+            SKSE::log::debug("Armed idle channels: Speed={:.3f}->0 written={} SpeedSampled={:.3f}->0 written={} nativeSprint={}",
                 speed,a,sampled,b,player->AsActorState()->IsSprinting());
     }
     static inline std::atomic_uint samples{};
@@ -1023,7 +1027,7 @@ struct PlayerFootstepFilter {
             if(ours&&managedAirAnimation&&usesVampireLordBehavior(player)&&event->tag.c_str()
                 &&nativeBatTravel.event(event->tag.c_str()))pauseVampireWingOverlay(true);
             if(ours&&(muteAirFootEvent(event)||muteNativeWingEvent(event))){
-                if(samples.fetch_add(1)<16)SKSE::log::info("Suppressed airborne footstep consumer: tag={} payload={}",event->tag.c_str(),event->payload.c_str()?event->payload.c_str():"");
+                if(samples.fetch_add(1)<16)SKSE::log::debug("Suppressed airborne footstep consumer: tag={} payload={}",event->tag.c_str(),event->payload.c_str()?event->payload.c_str():"");
                 // Skip only this player's native footstep consumer. Continue event
                 // dispatch for other sinks; never block attack or real landing tags.
                 return RE::BSEventNotifyControl::kContinue;
@@ -1061,7 +1065,7 @@ struct JumpFilter {
                         (match.profile&&match.profile->continuousFlight) || player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina) >= config.tuning.flapCost)) {
                         std::lock_guard lock(inputMutex);
                         input.takeoff = true; input.flap = true;
-                        SKSE::log::info("Claimed airborne Jump for flight before the native jump handler");
+                        SKSE::log::debug("Claimed airborne Jump for flight before the native jump handler");
                         return false;
                     }
                 }
@@ -1101,6 +1105,7 @@ void load(SKSE::SerializationInterface* serialization) {
     resumeMode=state.resumeMode;resumeWait=0;preferredFlightMode=state.preferredMode;
 }
 void resetSession() {
+    resetActorFlight();
     jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
     resetHeldWings();
     flightCollision.reset();
@@ -1159,6 +1164,8 @@ void message(SKSE::MessagingInterface::Message* message) {
             // configuration commit run together on the SKSE game task thread.
             saveLiveSettings(std::filesystem::absolute("Data/SKSE/Plugins/Wingflight.ini"),candidate);
             applyLiveSettings(config,candidate,inverseScale);
+            logging::configure(config.logSamples);
+            SKSE::log::debug("NPC flight settings applied: Enabled={} FollowDistance={:.2f}; airborne actors land safely when disabled",config.actors.enabled,config.actors.followDistance);
             flightCollision.reset();
             applyLowerBodySettings(config);
             clearInput();
@@ -1195,10 +1202,11 @@ void message(SKSE::MessagingInterface::Message* message) {
             SKSE::log::error("Wing-art driver unavailable; AWU/MDDA flight disabled; native Vampire Lord backend readiness is independent");
             if(!vampireSceneReady())break;
         }
-        SKSE::log::info("Integrated providers revision=vlrn-auto-7-se1597; Wingflight 0.3.14; vanilla/VLrn/AWU wing support and SE 1.5.97 runtime dispatch");
+        SKSE::log::info("Integrated providers revision=vlrn-auto-7-se1597; Wingflight 0.4.0; vanilla/VLrn/AWU wing support and SE 1.5.97 runtime dispatch");
         installHeldWingEvents();
         SKSE::log::info("Better Jumping detected={}; ground/ineligible jumps preserve original handler; eligible air presses belong to Wingflight",
             GetModuleHandleW(L"BetterJumpingSE.dll") != nullptr);
+        initializeActorFlight(config,wings);
         ready = true;
         SKSE::log::info("Ready. Armed idle={} DisableSprintWhenArmed={}. BFCO-independent. No attack, stamina-drain, collision-filter or gravity hooks. Physical game validation pending.",config.armedFlightIdle,config.disableSprintWhenArmed);
         break;
@@ -1210,7 +1218,7 @@ void message(SKSE::MessagingInterface::Message* message) {
 
 extern "C" __declspec(dllexport) constinit SKSE::PluginVersionData SKSEPlugin_Version = [] {
     SKSE::PluginVersionData version;
-    version.PluginVersion({0, 3, 14, 0}); version.PluginName("Wingflight"); version.AuthorName("ROSVER");
+    version.PluginVersion({0, 4, 0, 0}); version.PluginName("Wingflight"); version.AuthorName("ROSVER");
     // The generic-struct flag covers CommonLib's version-selected accessors;
     // the post-629-only bit is rejected by older SKSE loaders.
     version.UsesAddressLibrary(); version.UsesNoStructs();
@@ -1223,7 +1231,7 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Query(const SKSE::QueryInterfac
     if(!skse||!info)return false;
     info->infoVersion=SKSE::PluginInfo::kVersion;
     info->name="Wingflight";
-    info->version=REL::Version(0,3,14,0).pack();
+    info->version=REL::Version(0,4,0,0).pack();
     const auto version=skse->RuntimeVersion();
     return !skse->IsEditor()&&runtime::supported(runtime::select(version[0],version[1],version[2],version[3]));
 }
@@ -1257,6 +1265,8 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Load(const SKSE::LoadInterface*
     SKSE::log::info("Wingflight failure diagnostics revision=failure-details-1; existing guard decisions unchanged; repeated causes limited by context");
     try { config = wingflight::loadAndMigrateConfiguration(); }
     catch (const std::exception& error) { SKSE::log::critical("Configuration error: {}", error.what()); return false; }
+    logging::configure(config.logSamples);
+    SKSE::log::info("Logging initialized: DetailedLogging={}; initialization, compatibility, warnings and errors always retained; revision=logging-9",config.logSamples);
     SKSE::log::info("Sprint wings revision=configurable-recovery-1: HighSpeedFlapHoldSeconds={:.2f}; entry reuses downswing only above estimated 70 percent raised height",config.highSpeedFlapHoldSeconds);
     SKSE::log::info("Flight collision revision=unarmed-pain-3: damaging impact ends flight, unarmed flesh impact plus native player Hit topic; Enabled={} Multiplier={:.2f} DamageActors={} MinImpactSpeed={:.2f}",config.collision.enabled,config.collision.multiplier,config.collision.damageActors,config.collision.minSpeed);
     SKSE::log::info("AWU jump preview revision=absolute-over-open-5: open={:.2f}% initialOpen={:.2f}% opening={:.2f}s settle={:.2f}s flutterPeriod={:.2f}s flutterAmplitude={:.2f} (independent of SpreadAmplitudeMultiplier)",config.jumpWingOpenPercent,config.jumpWingOverOpenPercent,config.jumpWingOpenSeconds,config.jumpWingSettleSeconds,config.jumpWingFlutterPeriod,config.jumpWingFlutterAmplitude);
@@ -1267,6 +1277,6 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Load(const SKSE::LoadInterface*
         vm->RegisterFunction("IsEnabled", "WingflightNative", +[](RE::StaticFunctionTag*) -> bool { return ready.load(); });
         return true;
     });
-    SKSE::log::info("Wingflight 0.3.14 ALPHA for Skyrim {}. {} adapters. FAR resource defaults and optional OAR flight poses; integrated wing providers and runtime compatibility; optional Mod Control Panel. 1.7 gameplay validation pending.",runtimeName(),config.profiles.size());
+    SKSE::log::info("Wingflight 0.4.0 ALPHA for Skyrim {}. {} adapters. FAR resource defaults and optional OAR flight poses; integrated wing providers and runtime compatibility; optional Mod Control Panel. 1.7 gameplay validation pending.",runtimeName(),config.profiles.size());
     return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

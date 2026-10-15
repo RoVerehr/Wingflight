@@ -138,7 +138,7 @@ void updateHeldWings(WingMatch match,float dt,bool held,bool airborne,bool fullF
             // JumpFall is permitted only when open is requested; fold commands
             // are permitted only on release. Queued events obey the same gate.
             const bool accepted=model->NotifyAnimationGraph(RE::BSFixedString(command));
-            if(samples++<20||!accepted)SKSE::log::info("AWU held-jump wing command: open={} state={} event={} accepted={} held={}",open,state,command,accepted,held);
+            if(samples++<20||!accepted)SKSE::log::debug("AWU held-jump wing command: open={} state={} event={} accepted={} held={}",open,state,command,accepted,held);
             if(!accepted)diagnostic::report("held-wings.command-rejected","retain native wing pose",model,command);
         }
     }

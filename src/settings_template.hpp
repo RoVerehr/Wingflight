@@ -1,14 +1,36 @@
 #pragma once
 #include <string_view>
 namespace wingflight {
-inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.3.14-8. Startup updates this layout and comments.
+inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.4.0-4. Startup updates this layout and comments.
 ; Recognized settings are retained; replaced INIs are backed up beside this file.
-; Mod Control Panel: Flight, FreeFlight, Stamina, Jump, Lower Body tuning and keyboard/gamepad flight controls apply/save live.
+; Mod Control Panel: Flight, NPC Flight, FreeFlight, Stamina, Jump, Lower Body tuning and controls apply/save live.
 ; Other settings remain startup-only. External INI edits still require a restart.
 ; Wingflight: original provider wings are sampled and blended at runtime.
 [General]
 Enabled=1
-DiagnosticSamples=1
+; Apply/save live in Mod Control Panel / Logging. Off by default.
+; 0: initialization, compatibility decisions, warnings and errors only.
+; 1: also record flight, wings, animation, NPC and combat details in Wingflight.log.
+; Replaces the old DiagnosticSamples switch; its old value is intentionally retired.
+DetailedLogging=0
+
+[NPCFlight]
+; Nearby loaded NPCs currently following the player can follow full flight if their wings bind.
+; Uses the same wing-provider INIs as the player. No autonomous NPC takeoff.
+; Ground follower packages, recruitment and waiting orders remain owned by their original mods.
+; Apply/save live. Disabling prevents takeoff and safely lands airborne NPCs.
+Enabled=1
+; Apply/save live. 0: land safely for combat. 1: already-flying followers can fight in air.
+; Native AI selects enemies, weapons/spells and attacks; Wingflight controls aerial positioning.
+; Melee approaches the enemy; ranged flight uses the equipped attack's native range.
+; Fleeing or unresolved target/equipment falls back to safe ground combat.
+; After combat: resume following if the player is flying, otherwise land.
+AirCombat=1
+; Maximum simultaneous NPC flight contexts (1..64); startup-only, not a recruitment limit.
+MaxActors=32
+; Distance behind the player's current position, in Skyrim units (70..2000).
+; Apply/save live. No recorded routes. Later rows stay farther behind; collisions remain enabled.
+FollowDistance=200.00
 
 [Keyboard]
 ; DirectInput scan codes. Jump follows Skyrim's remapped Jump control.

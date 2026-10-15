@@ -18,6 +18,7 @@ struct LiveFloatSetting {
 };
 // This is the complete menu allowlist. All other settings remain startup-only.
 inline constexpr auto liveFloatSettings = std::to_array<LiveFloatSetting>({
+    {"NPCFlight","FollowDistance","Distance behind the player's current position, in Skyrim units (70 units is about one metre). Saved values apply to airborne followers immediately.",70,2000,[](Configuration& c)->float&{return c.actors.followDistance;}},
     {"Jump","OverOpenPercent","Initial jump wing opening, independently set from 0 to 100. 100 opens fully, then WingSettleSeconds transitions to WingOpenPercent. Set both percentages equal for no return motion.",0,100,[](Configuration& c)->float&{return c.jumpWingOverOpenPercent;}},
     {"Jump","WingOpenSeconds","Seconds to ease into the jump opening peak; also used to fold on landing.",.05f,3,[](Configuration& c)->float&{return c.jumpWingOpenSeconds;}},
     {"Jump","WingSettleSeconds","Seconds to transition from OverOpenPercent to WingOpenPercent.",.05f,3,[](Configuration& c)->float&{return c.jumpWingSettleSeconds;}},
@@ -93,6 +94,9 @@ inline void applyLiveSettings(Configuration& current, Configuration candidate, f
     roundLiveSettings(candidate);
     for (const auto& setting : liveFloatSettings) setting.value(current)=setting.value(candidate);
     current.disableSprintWhenArmed=candidate.disableSprintWhenArmed;
+    current.actors.enabled=candidate.actors.enabled;
+    current.actors.airCombat=candidate.actors.airCombat;
+    current.logSamples=candidate.logSamples;
     current.collision.enabled=candidate.collision.enabled;
     current.collision.damageActors=candidate.collision.damageActors;
     current.legRelaxation.enabled=candidate.legRelaxation.enabled;

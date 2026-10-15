@@ -1,4 +1,5 @@
 #include "lower_body.hpp"
+#include "logging.hpp"
 #include "lower_body_policy.hpp"
 #include "armed_bank.hpp"
 #include "flight_pitch.hpp"
@@ -11,6 +12,7 @@
 #include "leg_pose_animation.hpp"
 #include "flight_pose_policy.hpp"
 #include "weapon_leg_handoff.hpp"
+#include "actor_flight.hpp"
 #include <MinHook.h>
 #include <Windows.h>
 #include <atomic>
@@ -43,7 +45,6 @@ legs::LegAcceleration legAcceleration;
 std::array<legs::DampedLegSwing,2> legSwing;
 float relaxationWeight{},relaxationSampleTime{};
 float secondaryWeight{1};
-bool logSamples{};
 bool pitchEnabled{};
 float pitchSeconds{0.25f},pitchAngle{};
 legs::FlightPitchMotion pitchMotion;
@@ -69,6 +70,29 @@ std::unordered_map<const RE::hkbClipGenerator*,Clip> clips; // identity only; ne
 std::unordered_set<std::string> logged;
 RE::NiPointer<RE::NiAVObject> root;
 struct Bone { RE::NiPointer<RE::NiAVObject> node; legs::Quaternion source{},output{},visible{},handoffSeed{}; bool wrote{},visibleSeen{}; };
+struct ActorLegs {
+    RE::ActorHandle actor;
+    RE::NiPointer<RE::NiAVObject> root;
+    RE::NiPointer<RE::BSFlattenedBoneTree> tree;
+    std::array<Bone,8> bones;
+    Bone center;
+    legs::LegPoseBlend poses;
+    legs::WeaponLegHandoff handoff;
+    legs::LegRelaxationBlend tuning;
+    legs::LegAcceleration acceleration;
+    std::array<legs::DampedLegSwing,2> swing;
+    std::unordered_map<const RE::hkbClipGenerator*,Clip> clips;
+    std::uint64_t tick{},applied{~0ULL};
+    legs::LegMotionInput motion;
+    float dt{},clock{},weight{},relaxed{},secondary{1},lean{};
+    int mode{1};bool active{true},complete{};unsigned samples{},retainedSamples{};
+};
+using ActorLegMap=std::unordered_map<const RE::NiAVObject*,std::shared_ptr<ActorLegs>>;
+std::atomic<std::shared_ptr<const ActorLegMap>> actorLegs;
+legs::LegRelaxation actorRelaxation;
+std::atomic_bool actorSceneReady{};
+void applyActorLegs(RE::NiAVObject* object,RE::NiUpdateData* data);
+void observeActorLegs(RE::NiAVObject* object);
 std::array<Bone,8> cached;
 Bone center;
 std::array<Bone,5> aligned;
@@ -188,8 +212,8 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
     const float recoverySeconds=std::max({0.75f,legPoseTiming.movement,blendIn,blendOut,
         fast?std::max(legPoseTiming.sprintIn,legPoseTiming.sprintOut):0.0f});
     const auto handoff=weaponLegHandoff.update(weaponPhase,on&&legsReady,dt,blendIn,recoverySeconds);
-    if(handoff.capture&&logSamples)
-        SKSE::log::info("Flight leg weapon handoff: state={} armed={} retainFlightLegs=true recovery={:.3f}s; native thigh motion resumes after handoff",static_cast<unsigned>(weaponState),armed,recoverySeconds);
+    if(handoff.capture&&logging::detailed())
+        SKSE::log::debug("Flight leg weapon handoff: state={} armed={} retainFlightLegs=true recovery={:.3f}s; native thigh motion resumes after handoff",static_cast<unsigned>(weaponState),armed,recoverySeconds);
     legs::LegPose target{};
     if(legEnabled){
         if(on&&(armed||handoff.protect))legClock+=dt;
@@ -305,63 +329,176 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
         b.visible=readRotation(b.node->local.rotate);b.visibleSeen=true;
     }
     if(relaxationWeight==0){for(auto& swing:legSwing)swing.reset();}
-    if(logSamples&&relaxing&&(relaxationSampleTime+=dt)>=2){
+    if(logging::detailed()&&relaxing&&(relaxationSampleTime+=dt)>=2){
         relaxationSampleTime=0;
         const auto difference=[&](unsigned bone){return 114.591559f*std::acos(std::clamp(std::abs(legs::dot(cached[bone].source,target[bone])),0.0f,1.0f));};
-        SKSE::log::info("Armed leg relaxation: authoredThigh={:.2f} weight={:.3f} kneeSwing={:.2f}/{:.2f}deg max={:.2f} stiffness={:.2f} damping={:.2f} poseWeights={:.2f}/{:.2f}/{:.2f} nativeThighVsReference={:.2f}/{:.2f}deg",
+        SKSE::log::debug("Armed leg relaxation: authoredThigh={:.2f} weight={:.3f} kneeSwing={:.2f}/{:.2f}deg max={:.2f} stiffness={:.2f} damping={:.2f} poseWeights={:.2f}/{:.2f}/{:.2f} nativeThighVsReference={:.2f}/{:.2f}deg",
             relaxation.thighAnimationWeight,relaxed,legSwing[0].angle(),legSwing[1].angle(),relaxation.maxSwingDegrees,relaxation.stiffness,relaxation.damping,
             legPoseWeights[0],legPoseWeights[1],legPoseWeights[2],difference(0),difference(4));
     }
-    if(eased>0&&appliedSamples++<6)
-        SKSE::log::info("Lower-body pose applied: frame={} weight={:.3f} bones=8 updateTime={:.4f}",now,eased,data?data->time:0);
+    if(logging::detailed()&&eased>0&&appliedSamples++<6)
+        SKSE::log::debug("Lower-body pose applied: frame={} weight={:.3f} bones=8 updateTime={:.4f}",now,eased,data?data->time:0);
 }
 struct ThirdPersonUpdate {
     static void thunk(RE::NiAVObject* object,RE::NiUpdateData* data){
-        applyVampireWings(object);apply(object,data);original(object,data);
+        applyActorLegs(object,data);applyVampireWings(object);apply(object,data);original(object,data);observeActorLegs(object);
         // Confirm that the native scene update did not immediately overwrite the
         // eight rotations. This is diagnostic only, never a second pose write.
-        if(wanted&&retainedSamples<6){
+        if(logging::detailed()&&wanted&&retainedSamples<6){
             std::lock_guard lock(poseMutex);
             if(root.get()==object&&weight>0){
                 unsigned retained=0;
                 for(const auto& b:cached)if(b.node&&b.wrote&&std::abs(legs::dot(readRotation(b.node->local.rotate),b.output))>0.99999f)++retained;
-                SKSE::log::info("Lower-body post-update retained rotations: {}/8",retained);++retainedSamples;
+                SKSE::log::debug("Lower-body post-update retained rotations: {}/8",retained);++retainedSamples;
             }
         }
-        if(wanted&&leanRetainedSamples<8){
+        if(logging::detailed()&&wanted&&leanRetainedSamples<8){
             std::lock_guard lock(poseMutex);
             if(root.get()==object&&center.node&&center.wrote&&leanWeight>0){
                 const bool retained=std::abs(legs::dot(readRotation(center.node->local.rotate),center.output))>0.99999f;
-                SKSE::log::info("Armed sprint lean retained={} COMPitch={:.2f} target={:.2f} weight={:.3f}",retained,
+                SKSE::log::debug("Armed sprint lean retained={} COMPitch={:.2f} target={:.2f} weight={:.3f}",retained,
                     legs::forwardPitch(center.output),leanDegrees,leanWeight);++leanRetainedSamples;
             }
         }
-        if(wanted&&alignRetainedSamples<8){
+        if(logging::detailed()&&wanted&&alignRetainedSamples<8){
             std::lock_guard lock(poseMutex);
             if(root.get()==object&&alignWeight>0){
                 unsigned retained=0,total=0;
                 for(const auto& b:aligned)if(b.node&&b.wrote){++total;
                     if(std::abs(legs::dot(readRotation(b.node->local.rotate),b.output))>0.99999f)++retained;}
-                SKSE::log::info("Armed sprint auto-align retained={}/{} weight={:.3f} (actor scene-root yaw unchanged)",retained,total,alignWeight);
+                SKSE::log::debug("Armed sprint auto-align retained={}/{} weight={:.3f} (actor scene-root yaw unchanged)",retained,total,alignWeight);
                 ++alignRetainedSamples;
             }
         }
-        if(wanted&&bankRetainedSamples<8){
+        if(logging::detailed()&&wanted&&bankRetainedSamples<8){
             std::lock_guard lock(poseMutex);
             if(root.get()==object&&center.node&&center.wrote&&std::abs(bankAngle)>1){
                 const bool retained=std::abs(legs::dot(readRotation(center.node->local.rotate),center.output))>0.99999f;
-                SKSE::log::info("Shared flight bank retained={} angle={:.2f} (current actor-forward axis)",retained,bankAngle);
+                SKSE::log::debug("Shared flight bank retained={} angle={:.2f} (current actor-forward axis)",retained,bankAngle);
                 ++bankRetainedSamples;
             }
         }
     }
     static inline REL::Relocation<decltype(thunk)> original;
 };
+void refreshActorLegWorld(ActorLegs& s,RE::NiUpdateData& data){
+    // Animation evaluation and selected bone passes can bypass NiAVObject::Update.
+    // Refresh only changed subtrees; never evaluate controllers/animations twice.
+    auto refresh=[&](auto&& self,RE::NiAVObject* node,unsigned depth)->void{
+        if(!node||depth>32)return;node->UpdateWorldData(&data);
+        if(const auto branch=node->AsNode())for(const auto& child:branch->GetChildren())if(child)self(self,child.get(),depth+1);
+    };
+    if(s.center.wrote&&s.center.node)refresh(refresh,s.center.node.get(),0);
+    else for(unsigned i:{0u,4u})if(s.bones[i].node)refresh(refresh,s.bones[i].node.get(),0);
+    if(!s.tree)return;auto& tree=s.tree->GetRuntimeData();
+    if(!tree.boneEntries||tree.numBones>2048)return;
+    for(unsigned i=0;i<tree.numBones;++i){auto& bone=tree.boneEntries[i];
+        if(bone.node){bone.local=bone.node->local;bone.world=bone.node->world;}
+        else if(bone.parentIndex>=0&&static_cast<unsigned>(bone.parentIndex)<i)
+            bone.world=tree.boneEntries[bone.parentIndex].world*bone.local;
+    }
+}
+template<unsigned Slot,bool Flattened>struct ActorBonePass {
+    static void thunk(RE::NiNode* node,RE::NiUpdateData& data,std::uint32_t flags){
+        original(node,data,flags);
+        applyVampireWings(node,&data,true);
+        const auto list=actorLegs.load();if(!list||list->empty())return;
+        auto object=static_cast<RE::NiAVObject*>(node);std::shared_ptr<ActorLegs> state;
+        for(unsigned depth=0;object&&depth<16;++depth,object=object->parent){
+            const auto it=list->find(object);if(it!=list->end()){state=it->second;break;}
+        }
+        if(!state)return;
+        if constexpr(Flattened){if(state->tree.get()!=node)return;}
+        else if(state->root.get()!=node)return;
+        applyActorLegs(state->root.get(),&data);
+        {std::lock_guard guard(poseMutex);if(state->active&&state->complete&&state->weight>0)refreshActorLegWorld(*state,data);}
+        observeActorLegs(state->root.get());
+    }
+    static inline REL::Relocation<decltype(thunk)> original;
+    static bool install(){
+        REL::Relocation<std::uintptr_t> table{Flattened?RE::VTABLE_BSFlattenedBoneTree[0]:RE::VTABLE_BSFadeNode[0]};
+        const auto previous=*reinterpret_cast<std::uintptr_t*>(table.address()+Slot*8);
+        if(!runtime::executableMemory(previous)){SKSE::log::error("NPC bone callback unavailable: flattened={} slot={:X} target={:X}",Flattened,Slot,previous);return false;}
+        original=table.write_vfunc(Slot,thunk);
+        SKSE::log::info("NPC selective bone callback installed: flattened={} slot={:X} chainedTarget={:X}",Flattened,Slot,previous);return true;
+    }
+};
+void installActorScene(){
+    bool ready=ActorBonePass<0x2C,true>::install();ready=ActorBonePass<0x2D,true>::install()&&ready;
+    ready=ActorBonePass<0x2E,true>::install()&&ready;
+    ready=ActorBonePass<0x2C,false>::install()&&ready;ready=ActorBonePass<0x2D,false>::install()&&ready;
+    ready=ActorBonePass<0x2E,false>::install()&&ready;actorSceneReady=ready;
+}
+void restoreActorLegs(ActorLegs& s){
+    for(auto& b:s.bones)if(b.node&&b.wrote&&std::abs(legs::dot(readRotation(b.node->local.rotate),b.output))>.999999f)writeRotation(b.node->local.rotate,b.source);
+    auto& b=s.center;if(b.node&&b.wrote&&std::abs(legs::dot(readRotation(b.node->local.rotate),b.output))>.999999f)writeRotation(b.node->local.rotate,b.source);
+}
+void applyActorLegs(RE::NiAVObject* object,RE::NiUpdateData*){
+    const auto list=actorLegs.load();if(!list||!object)return;
+    const auto it=list->find(object);if(it==list->end())return;
+    const auto state=it->second;std::lock_guard guard(poseMutex);auto& s=*state;
+    const auto actor=s.actor.get();
+    if(!s.active||!actor||!actor->Is3DLoaded()||actor->Get3D(false)!=object||actor->IsDead()||actor->IsInRagdollState()||actor->IsInKillMove())return;
+    if(s.applied==s.tick){for(auto& b:s.bones)if(b.node&&b.wrote)writeRotation(b.node->local.rotate,b.output);if(s.center.node&&s.center.wrote)writeRotation(s.center.node->local.rotate,s.center.output);return;}
+    s.applied=s.tick;const float dt=s.dt;
+    bool excluded=false;const auto serial=s.tick>>32;
+    for(auto i=s.clips.begin();i!=s.clips.end();)if(serial>i->second.seen+2)i=s.clips.erase(i);else{excluded|=i->second.excepted;++i;}
+    const bool on=legEnabled&&s.complete&&!excluded;
+    const auto tune=s.tuning.update(dt);const bool armed=actor->AsActorState()->IsWeaponDrawn();
+    auto phase=legs::WeaponPosePhase::sheathed;
+    switch(actor->AsActorState()->GetWeaponState()){
+    case RE::WEAPON_STATE::kWantToDraw:case RE::WEAPON_STATE::kDrawing:phase=legs::WeaponPosePhase::drawing;break;
+    case RE::WEAPON_STATE::kDrawn:phase=legs::WeaponPosePhase::drawn;break;
+    case RE::WEAPON_STATE::kWantToSheathe:case RE::WEAPON_STATE::kSheathing:phase=legs::WeaponPosePhase::sheathing;break;
+    default:break;}
+    const auto handoff=s.handoff.update(phase,on,dt,blendIn,std::max({.75f,legPoseTiming.movement,legPoseTiming.sprintIn,legPoseTiming.sprintOut,blendOut}));
+    s.weight=handoff.protect?1.f:legs::approach(s.weight,on,dt,on?blendIn:blendOut);
+    s.relaxed=legs::approach(s.relaxed,on&&armed&&tune.enabled&&!handoff.protect,dt,on&&armed?blendIn:blendOut);
+    s.secondary=legs::approach(s.secondary,tune.secondaryMotion,dt,.25f);
+    const float overlayWeight=s.weight*s.weight*(3-2*s.weight),relaxed=s.relaxed*s.relaxed*(3-2*s.relaxed);
+    s.clock+=dt;const auto weights=s.poses.update(pose::modeIndex(s.mode),dt,legPoseTiming);
+    std::array<legs::LegPose,3> sampled;for(unsigned i=0;i<3;++i)sampled[i]=legAnimations[i].sample(s.clock);
+    const auto target=legs::mixLegPoses(sampled,weights);
+    if(s.center.node){auto& b=s.center;auto native=readRotation(b.node->local.rotate);if(b.wrote&&std::abs(legs::dot(native,b.output))>.999999f)native=b.source;
+        s.lean=legs::approach(s.lean,on&&armed&&s.mode==3&&leanEnabled,dt,s.mode==3?leanIn:leanOut);
+        b.source=native;b.output=legs::towardForwardPitch(native,leanDegrees,s.lean*s.lean*(3-2*s.lean));b.wrote=s.lean>0;
+        writeRotation(b.node->local.rotate,b.wrote?b.output:native);
+    }
+    const auto acceleration=s.acceleration.update(dt,s.motion.velocity,on&&armed);
+    const float yaw=actor->GetAngleZ(),sine=std::sin(yaw),cosine=std::cos(yaw);
+    const RE::NiPoint3 force(acceleration.x*cosine-acceleration.y*sine,acceleration.x*sine+acceleration.y*cosine,acceleration.z);
+    const RE::NiPoint3 gravity(0,0,-s.motion.gravity);const legs::Quaternion rotation{0,0,std::sin(-yaw*.5f),std::cos(-yaw*.5f)};
+    if(s.complete)for(unsigned i=0;i<8;++i){
+        auto& b=s.bones[i];auto native=readRotation(b.node->local.rotate);if(b.wrote&&std::abs(legs::dot(native,b.output))>.999999f)native=b.source;
+        auto targetBone=target[i];float blend=overlayWeight;
+        if(handoff.capture)b.handoffSeed=b.visibleSeen?b.visible:targetBone;
+        const unsigned joint=i%4,side=i/4;
+        if(joint==0)blend=legs::thighFlightWeight(overlayWeight,relaxed,tune.thighAnimationWeight);
+        else if(joint==1){RE::NiMatrix3 basis;float drive{};legs::Quaternion parent{};
+            if(parentBasis(b.node.get(),object,basis)){const auto a=basis.Transpose()*force,g=basis.Transpose()*gravity;const auto offset=s.bones[i+1].node->local.translate;
+                drive=legs::kneeDrive(targetBone,{offset.x,offset.y,offset.z},{a.x,a.y,a.z},{g.x,g.y,g.z});parent=legs::multiply(rotation,readRotation(basis));}
+            auto spring=tune;spring.secondaryMotion=s.secondary>0;
+            const float angle=s.swing[side].update(dt,parent,drive,on&&armed&&tune.secondaryMotion,spring);
+            targetBone=legs::kneeSwing(targetBone,angle*relaxed*s.secondary);
+        }else if(joint==2)targetBone=legs::kneeSwing(targetBone,-.25f*s.swing[side].angle()*relaxed*s.secondary);
+        if(handoff.protect){targetBone=legs::blend(b.handoffSeed,targetBone,handoff.poseBlend);blend=1;}
+        b.source=native;b.output=legs::blend(native,targetBone,blend);b.wrote=overlayWeight>0;
+        writeRotation(b.node->local.rotate,b.wrote?b.output:native);b.visible=readRotation(b.node->local.rotate);b.visibleSeen=true;
+    }
+    if(logging::detailed()&&s.samples++<3)SKSE::log::debug("NPC lower-body pose applied: actor={:08X} mode={} armed={} weight={:.3f} weaponHandoff={} relaxed={:.3f}",actor->GetFormID(),s.mode,armed,overlayWeight,handoff.protect,relaxed);
+}
+void observeActorLegs(RE::NiAVObject* object){
+    if(!logging::detailed())return;const auto list=actorLegs.load();if(!list||!object)return;const auto it=list->find(object);if(it==list->end())return;
+    std::lock_guard guard(poseMutex);auto& s=*it->second;if(!s.active||!s.complete||s.weight<=0||s.retainedSamples>=3)return;
+    unsigned count{};for(const auto& b:s.bones)if(b.node&&b.wrote&&std::abs(legs::dot(readRotation(b.node->local.rotate),b.output))>.99999f)++count;
+    const auto actor=s.actor.get();SKSE::log::debug("NPC lower-body post-update retained rotations: actor={:08X} {}/8",actor?actor->GetFormID():0,count);++s.retainedSamples;
+}
 }
 
 void installLowerBody(const Configuration& config){
+    actorRelaxation=config.legRelaxation;
     legEnabled=config.lowerBodyEnabled;leanEnabled=config.armedSprintLean;
-    relaxation=config.legRelaxation;logSamples=config.logSamples;
+    relaxation=config.legRelaxation;
     relaxationBlend.initialize(relaxation);secondaryWeight=relaxation.secondaryMotion?1.0f:0.0f;
     legPoseTiming={config.movementBlendSeconds,config.sprintBlendInSeconds,config.sprintBlendOutSeconds};
     pitchEnabled=config.highSpeedPitch;pitchSeconds=config.highSpeedPitchBlendSeconds;
@@ -390,6 +527,7 @@ void installLowerBody(const Configuration& config){
         const auto enabled=MH_EnableHook(reinterpret_cast<void*>(sceneUpdate));
         if(enabled!=MH_OK) {MH_RemoveHook(reinterpret_cast<void*>(sceneUpdate));SKSE::log::error("Body overlay hook enabling failed: {}",static_cast<int>(enabled));return;}
         installed=true;installVampireScene();
+        installActorScene();
         SKSE::log::info("Body overlay installed at native scene-update entry for runtime {}; exact player root remains the ownership gate",runtimeName());
         return;
     }
@@ -432,6 +570,7 @@ void installLowerBody(const Configuration& config){
     if(call.size==5)SKSE::GetTrampoline().write_call<5>(site,ThirdPersonUpdate::thunk);
     else SKSE::GetTrampoline().write_call<6>(site,ThirdPersonUpdate::thunk);
     installed=true;installVampireScene();
+    installActorScene();
     SKSE::log::info("Lower-body hook chain installed: revision=call-chain-1 site={:X} callBytes={} previousDestination={:X} nativeDestination={:X} externalTarget={} argumentPrefixMatches={}",
         site,call.size,destination,expected,destination!=expected,prefixMatches);
     SKSE::log::info("Flight skeleton overlays installed: legs={} armedSprintLean={} autoAlign={} COMPitch={:.2f} blend={:.2f}/{:.2f}s armedBank={} bankMax={:.2f} bankBlend={:.2f}s OAR={} exceptions={}",
@@ -441,6 +580,35 @@ void applyLowerBodySettings(const Configuration& config){
     std::lock_guard lock(poseMutex);
     relaxationBlend.setTarget(config.legRelaxation);
     blendIn=config.lowerBodyBlendIn;blendOut=config.lowerBodyBlendOut;
+    actorRelaxation=config.legRelaxation;
+    if(const auto list=actorLegs.load())for(const auto& [sceneRoot,s]:*list)s->tuning.setTarget(actorRelaxation);
+}
+void prepareActorLowerBody(RE::Actor* actor,bool active,std::uint64_t tick,float dt,int mode,legs::LegMotionInput motion){
+    if(!actor)return;
+    std::lock_guard guard(poseMutex);const auto list=actorLegs.load();const auto object=active?actor->Get3D(false):nullptr;
+    if(!active||!actorSceneReady||!legEnabled||!object||usesVampireLordBehavior(actor)){
+        if(!list)return;auto next=std::make_shared<ActorLegMap>(*list);bool changed=false;
+        for(auto i=next->begin();i!=next->end();)if(i->second->actor.get().get()==actor){auto& s=*i->second;s.active=false;if(actor->Is3DLoaded()&&actor->Get3D(false)==s.root.get())restoreActorLegs(s);i=next->erase(i);changed=true;}else ++i;
+        if(changed)actorLegs.store(next);return;
+    }
+    std::shared_ptr<ActorLegs> state;if(list){const auto it=list->find(object);if(it!=list->end())state=it->second;}
+    if(!state){
+        auto next=std::make_shared<ActorLegMap>(list?*list:ActorLegMap{});
+        if(next->size()>=64){diagnostic::report("npc.lower-body-capacity","keep native legs for excess actor",actor);return;}
+        state=std::make_shared<ActorLegs>();state->actor=actor->GetHandle();state->root.reset(object);state->tuning.initialize(actorRelaxation);
+        for(unsigned i=0;i<8;++i){state->bones[i].node.reset(object->GetObjectByName(bones[i]));if(!state->bones[i].node)diagnostic::report("npc.leg-bone-missing","skip NPC leg overlay",actor,bones[i]);}
+        state->complete=std::all_of(state->bones.begin(),state->bones.end(),[](const auto& b){return b.node.get()!=nullptr;});
+        if(state->bones[0].node)for(auto node=state->bones[0].node->parent;node;node=node->parent)
+            if(const auto tree=netimmerse_cast<RE::BSFlattenedBoneTree*>(node)){state->tree.reset(tree);break;}
+        state->center.node.reset(object->GetObjectByName("NPC COM [COM ]"));(*next)[object]=state;actorLegs.store(next);
+    }
+    state->tick=tick;state->dt=std::isfinite(dt)?std::clamp(dt,0.f,.1f):0;state->mode=mode;state->motion=motion;
+}
+void releaseActorLowerBody(RE::NiAVObject* object){
+    if(!object)return;std::lock_guard guard(poseMutex);const auto list=actorLegs.load();if(!list)return;
+    const auto found=list->find(object);if(found==list->end())return;auto& s=*found->second;s.active=false;
+    const auto actor=s.actor.get();if(actor&&actor->Is3DLoaded()&&actor->Get3D(false)==object)restoreActorLegs(s);
+    auto next=std::make_shared<ActorLegMap>(*list);next->erase(object);actorLegs.store(next);
 }
 void prepareLowerBody(RE::PlayerCharacter* player,bool fullFlight,float dt,bool highSpeed,float turn,float flightPitch,legs::LegMotionInput motion){
     if(!installed)return;
@@ -465,6 +633,8 @@ void resetLowerBody(){
     wanted=false;fastFlight=false;bankTurn=0;pathPitch=0;for(auto& c:characters)c=nullptr;
     {std::lock_guard lock(clipMutex);clips.clear();}
     std::lock_guard lock(poseMutex);
+    if(const auto list=actorLegs.load())for(const auto& [object,s]:*list){s->active=false;const auto actor=s->actor.get();if(actor&&actor->Is3DLoaded()&&actor->Get3D(false)==object)restoreActorLegs(*s);}
+    actorLegs.store(nullptr);
     const auto player=RE::PlayerCharacter::GetSingleton();
     if(safe(player)&&root.get()==player->Get3D(false)&&center.node&&center.wrote
         &&std::abs(legs::dot(readRotation(center.node->local.rotate),center.output))>0.999999f)
@@ -481,20 +651,29 @@ float armedSprintLeanAngle(){std::lock_guard lock(poseMutex);return center.wrote
 float flightBankAngle(){std::lock_guard lock(poseMutex);return bankAngle;}
 float flightPitchAngle(){std::lock_guard lock(poseMutex);return pitchAngle;}
 void observeLowerBodyClip(RE::hkbClipGenerator* clip,const RE::hkbContext& context){
-    if(!wanted||!clip||!context.character||(!logClips&&rules.empty()))return;
-    bool player=false;for(auto& c:characters)if(c.load()==context.character){player=true;break;}if(!player)return;
+    if(!clip||!context.character||((!logClips||!logging::detailed())&&rules.empty()))return;
+    bool player=false;if(wanted)for(auto& c:characters)if(c.load()==context.character){player=true;break;}
+    RE::NiPointer<RE::Actor> npc;
+    if(!player){if(!actorLegs.load())return;npc=actorFlightPoseOwner(context.character).get();if(!npc)return;}
     std::string identity;
     if(oar){const auto info=oar->GetCurrentReplacementAnimationInfo(clip);if(info.animationPath.c_str())identity=info.animationPath.c_str();
         if(!identity.empty()&&info.variantFilename.c_str()&&info.variantFilename.c_str()[0])identity+="|variant="+std::string(info.variantFilename.c_str());}
     if(identity.empty()&&clip->animationName.c_str())identity=clip->animationName.c_str();
     identity=legs::canonical(identity);if(identity.empty())return;
     const bool excluded=std::any_of(rules.begin(),rules.end(),[&](const auto& r){return legs::matches(r,identity);});
+    if(npc){std::lock_guard lock(poseMutex);const auto list=actorLegs.load();if(!list)return;
+        const auto it=list->find(npc->Get3D(false));if(it==list->end())return;auto& s=*it->second;
+        if(excluded&&(s.clips.contains(clip)||s.clips.size()<256))s.clips[clip]={identity,true,s.tick>>32};else s.clips.erase(clip);return;
+    }
     std::lock_guard lock(clipMutex);
     // Track only exceptions. Ordinary helper/locomotion clips must not fill a
     // bounded table and prevent the actual exceptional attack from being seen.
     if(excluded)clips[clip]={identity,true,frame.load()};else clips.erase(clip);
-    if(logClips&&logged.size()<256&&logged.insert(identity).second)
-        SKSE::log::info("LowerBody clip: {} | keepOriginal={}",identity,excluded);
+    if(logging::detailed()&&logClips&&logged.size()<256&&logged.insert(identity).second)
+        SKSE::log::debug("LowerBody clip: {} | keepOriginal={}",identity,excluded);
 }
-void forgetLowerBodyClip(RE::hkbClipGenerator* clip){std::lock_guard lock(clipMutex);clips.erase(clip);}
+void forgetLowerBodyClip(RE::hkbClipGenerator* clip){
+    {std::lock_guard lock(clipMutex);clips.erase(clip);}
+    if(!actorLegs.load())return;std::lock_guard lock(poseMutex);if(const auto list=actorLegs.load())for(const auto& [sceneRoot,s]:*list)s->clips.erase(clip);
+}
 }
