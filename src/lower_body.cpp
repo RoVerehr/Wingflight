@@ -1,4 +1,5 @@
 #include "lower_body.hpp"
+#include "actor_state.hpp"
 #include "logging.hpp"
 #include "lower_body_policy.hpp"
 #include "armed_bank.hpp"
@@ -13,6 +14,7 @@
 #include "flight_pose_policy.hpp"
 #include "weapon_leg_handoff.hpp"
 #include "actor_flight.hpp"
+#include "registered_wings.hpp"
 #include <MinHook.h>
 #include <Windows.h>
 #include <atomic>
@@ -52,7 +54,6 @@ bool bankEnabled{},armedBankEnabled{};
 float bankDegrees{20},bankSeconds{0.35f},bankAngle{};
 legs::FlightBankMotion bankMotion;
 float blendIn{0.3f},blendOut{0.25f},weight{};
-bool logClips{};
 bool legEnabled{},leanEnabled{};
 bool autoAlignEnabled{};
 float alignWeight{};
@@ -116,7 +117,7 @@ bool parentBasis(RE::NiAVObject* node,RE::NiAVObject* object,RE::NiMatrix3& basi
     return ancestor==object;
 }
 bool safe(RE::PlayerCharacter* p){
-    return p&&p->Is3DLoaded()&&!p->IsDead()&&!p->IsInRagdollState()&&!p->IsInKillMove()
+    return p&&p->Is3DLoaded()&&!p->IsDead()&&!knockedDown(p)&&!p->IsInKillMove()
         &&p->AsActorState()->GetKnockState()==RE::KNOCK_STATE_ENUM::kNormal;
 }
 bool excepted(){
@@ -341,7 +342,7 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
 }
 struct ThirdPersonUpdate {
     static void thunk(RE::NiAVObject* object,RE::NiUpdateData* data){
-        applyActorLegs(object,data);applyVampireWings(object);apply(object,data);original(object,data);observeActorLegs(object);
+        applyActorLegs(object,data);applyVampireWings(object);applyRegisteredWingPoses(object,data);apply(object,data);original(object,data);applyRegisteredWingPoses(object,data,true);observeActorLegs(object);
         // Confirm that the native scene update did not immediately overwrite the
         // eight rotations. This is diagnostic only, never a second pose write.
         if(logging::detailed()&&wanted&&retainedSamples<6){
@@ -402,6 +403,7 @@ template<unsigned Slot,bool Flattened>struct ActorBonePass {
     static void thunk(RE::NiNode* node,RE::NiUpdateData& data,std::uint32_t flags){
         original(node,data,flags);
         applyVampireWings(node,&data,true);
+        applyRegisteredWingPoses(node,&data,true);
         const auto list=actorLegs.load();if(!list||list->empty())return;
         auto object=static_cast<RE::NiAVObject*>(node);std::shared_ptr<ActorLegs> state;
         for(unsigned depth=0;object&&depth<16;++depth,object=object->parent){
@@ -438,7 +440,7 @@ void applyActorLegs(RE::NiAVObject* object,RE::NiUpdateData*){
     const auto it=list->find(object);if(it==list->end())return;
     const auto state=it->second;std::lock_guard guard(poseMutex);auto& s=*state;
     const auto actor=s.actor.get();
-    if(!s.active||!actor||!actor->Is3DLoaded()||actor->Get3D(false)!=object||actor->IsDead()||actor->IsInRagdollState()||actor->IsInKillMove())return;
+    if(!s.active||!actor||!actor->Is3DLoaded()||actor->Get3D(false)!=object||actor->IsDead()||knockedDown(actor)||actor->IsInKillMove())return;
     if(s.applied==s.tick){for(auto& b:s.bones)if(b.node&&b.wrote)writeRotation(b.node->local.rotate,b.output);if(s.center.node&&s.center.wrote)writeRotation(s.center.node->local.rotate,s.center.output);return;}
     s.applied=s.tick;const float dt=s.dt;
     bool excluded=false;const auto serial=s.tick>>32;
@@ -507,7 +509,7 @@ void installLowerBody(const Configuration& config){
     bankDegrees=config.bankDegrees;bankSeconds=config.bankBlendSeconds;
     leanDegrees=config.armedSprintLeanDegrees;leanIn=config.armedSprintLeanIn;leanOut=config.armedSprintLeanOut;
     if(!legEnabled&&!leanEnabled&&!bankEnabled&&!pitchEnabled)SKSE::log::info("Human skeleton overlays disabled by INI; native Vampire Lord scene callback remains available");
-    blendIn=config.lowerBodyBlendIn;blendOut=config.lowerBodyBlendOut;logClips=config.lowerBodyLogClips;
+    blendIn=config.lowerBodyBlendIn;blendOut=config.lowerBodyBlendOut;
     if(legEnabled&&!loadPose())legEnabled=false;
     loadRules();
     const auto module=GetModuleHandleW(L"OpenAnimationReplacer.dll");
@@ -651,7 +653,7 @@ float armedSprintLeanAngle(){std::lock_guard lock(poseMutex);return center.wrote
 float flightBankAngle(){std::lock_guard lock(poseMutex);return bankAngle;}
 float flightPitchAngle(){std::lock_guard lock(poseMutex);return pitchAngle;}
 void observeLowerBodyClip(RE::hkbClipGenerator* clip,const RE::hkbContext& context){
-    if(!clip||!context.character||((!logClips||!logging::detailed())&&rules.empty()))return;
+    if(!clip||!context.character||(!logging::detailed()&&rules.empty()))return;
     bool player=false;if(wanted)for(auto& c:characters)if(c.load()==context.character){player=true;break;}
     RE::NiPointer<RE::Actor> npc;
     if(!player){if(!actorLegs.load())return;npc=actorFlightPoseOwner(context.character).get();if(!npc)return;}
@@ -669,7 +671,7 @@ void observeLowerBodyClip(RE::hkbClipGenerator* clip,const RE::hkbContext& conte
     // Track only exceptions. Ordinary helper/locomotion clips must not fill a
     // bounded table and prevent the actual exceptional attack from being seen.
     if(excluded)clips[clip]={identity,true,frame.load()};else clips.erase(clip);
-    if(logging::detailed()&&logClips&&logged.size()<256&&logged.insert(identity).second)
+    if(logging::detailed()&&logged.size()<256&&logged.insert(identity).second)
         SKSE::log::debug("LowerBody clip: {} | keepOriginal={}",identity,excluded);
 }
 void forgetLowerBodyClip(RE::hkbClipGenerator* clip){

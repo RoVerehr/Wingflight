@@ -4,12 +4,13 @@
 #include "wing_runtime.hpp"
 #include "ground_wing_recovery.hpp"
 #include "logical_wings.hpp"
+#include "registered_wings.hpp"
 #include <RE/Skyrim.h>
 #include <unordered_map>
 
 namespace wingflight {
 // All three pointers are borrowed for the current update, not retained owners.
-struct WingMatch { const WingProfile* profile{}; RE::ActiveEffect* effect{}; RE::Actor* owner{}; };
+struct WingMatch { const WingProfile* profile{}; RE::ActiveEffect* effect{}; RE::Actor* owner{}; RE::NiAVObject* model{}; };
 struct WingPlayback {
     bool found{}, active{}, gliding{},spreadActive{};
     float spreadWeight{},graphSpreadWeight{};
@@ -38,11 +39,12 @@ public:
     void clearVisual(bool smooth=false);
     void updateGroundRecovery(WingMatch match,float dt,bool grounded,bool fullFlight);
 private:
-    bool nativeActive_{},artReady_{};
+    bool nativeActive_{},artReady_{},registeredActive_{};
     bool logicalActive_{};
     LogicalWings logical_;
     WingProfile vampireProfile_;
     WingRuntime runtime_;
+    mutable RegisteredWingRuntime registered_;
     std::unordered_map<const RE::ModelReferenceEffect*,GroundWingRecovery> groundRecovery_;
     std::unordered_map<RE::EffectSetting*, const WingProfile*> effects_;
     std::unordered_map<const WingProfile*, RE::BGSSoundDescriptorForm*> sounds_;

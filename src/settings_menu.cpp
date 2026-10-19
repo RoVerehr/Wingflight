@@ -2,6 +2,7 @@
 #include "live_settings.hpp"
 #include "gamepad_input.hpp"
 #include "diagnostics.hpp"
+#include "registered_wings.hpp"
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
 #include <atomic>
@@ -116,6 +117,8 @@ void renderSection(const char* section) {
         tooltip(setting.help);
     }
     if(std::string_view(section)=="Flight") {
+        ImGuiMCP::Checkbox("End Flight on Ground",&draft.tuning.endFlightOnGround);
+        tooltip("On: touching supporting ground ends full flight. Off: keep flight movement and poses; Jump lifts off again. Automatic lift pauses while grounded. Held-Jump glide, damaging collisions and other flight interruptions keep their normal exit rules. Apply and Save takes effect immediately.");
         ImGuiMCP::Checkbox("DisableSprintWhenArmed",&draft.disableSprintWhenArmed);
         tooltip("Disable armed sprint flight. Drawing a weapon also ends high-speed flight. Ground sprint is unchanged.");
     }
@@ -211,6 +214,10 @@ void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) 
     SKSEMenuFramework::SetSection("Wingflight");
     SKSEMenuFramework::AddSectionItem("Flight",renderFlight);
     SKSEMenuFramework::AddSectionItem("NPC Flight",renderNPCFlight);
+    bool customMenu=true;
+    for(const auto name:{"igTextUnformatted","igNewLine","igPushID_Int"})if(!GetProcAddress(module,name)){
+        customMenu=false;SKSE::log::warn("Custom Wings panel unavailable: SKSE Menu Framework lacks {}; registration INIs remain available",name);}
+    if(customMenu)SKSEMenuFramework::AddSectionItem("Custom Wings",renderWingRegistrationMenu);
     SKSEMenuFramework::AddSectionItem("Free Flight",renderFree);
     SKSEMenuFramework::AddSectionItem("Stamina",renderStamina);
     SKSEMenuFramework::AddSectionItem("Jump",renderJump);
@@ -220,6 +227,6 @@ void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) 
     captureInput=std::make_unique<SKSEMenuFramework::Model::InputEvent>(onInput);
     registered.store(true,std::memory_order_release);
     SKSEMenuFramework::AddSectionItem("Logging",renderLogging);
-    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, NPC Flight, Free Flight, Stamina, Jump, Lower Body, Collision, Controls, Logging");
+    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, NPC Flight, Custom Wings available={}, Free Flight, Stamina, Jump, Lower Body, Collision, Controls, Logging",customMenu);
 }
 }

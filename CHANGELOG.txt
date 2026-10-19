@@ -1,3 +1,16 @@
+Wingflight 0.4.1
+- Add custom-wing registration for equipped armor and active magic effects, shared by the player and NPCs. Scan compatible models and save their settings through the Custom Wings panel or an INI.
+- Add AWU-style, Fairy and Vampire Lord motion templates, an Authored template for animations embedded in the wing model, and manual INI-only Invisible registration.
+- Add adjustable wing angles, root-to-tip motion, folding, downstroke bending and feather motion, with separate timing and amplitude for multiple wing pairs.
+- Fix rotation controls, left/right mirroring, equipment-change recognition and camera-dependent wingbeat angles. Extend bent outer wing chains and restart the takeoff stroke when re-entering flight.
+- Add custom-wing sounds referencing installed AWU resources, or Dawnguard wingbeats for ordinary and sprint flight when registering without AWU.
+- Keep already-flying followers airborne when follower frameworks such as NFF switch to Relax or sandbox packages, while respecting explicit waiting and dismissal.
+- Improve flight continuity during temporary control locks, animation interruptions and character-controller replacement. Add more specific interruption diagnostics.
+- Add End Flight on Ground, enabled by default. Disable it to retain flight, flight poses and footstep filtering through ground contact, then take off again with Jump.
+- Fix crouched flight after taking off while sneaking, using the native sneak action. Ordinary jumps and outside-flight gliding retain their existing sneak behavior.
+- Merge animation path logging into Detailed Logging, including live panel toggles. Remove LogAnimations during the normal INI refresh while preserving existing valid settings.
+- Fix GOG 1.6.659 and 1.6.1179 being rejected during loading by handling SKSE's GOG platform marker separately from the executable file version.
+
 Wingflight 0.4.0
 - Add flight following for winged NPCs and followers, using the same wing providers as the player.
 - Follow the player's current position with adjustable separation, shared wingbeat/lift settings and sprint catch-up.

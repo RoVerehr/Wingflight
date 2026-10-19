@@ -67,7 +67,7 @@ struct FollowEvidence {
     bool inCombat{},airCombat{};
     bool preparingFlight{}; // Bounded, Wingflight-requested stance transition only.
 };
-enum class FollowReason {following,temporaryAnimation,unsafe,waiting,scene,hostile,targetChanged,noTravel,airCombat,groundCombat,takeoffPreparation};
+enum class FollowReason {following,temporaryAnimation,unsafe,waiting,scene,hostile,targetChanged,noTravel,airCombat,groundCombat,takeoffPreparation,relationship};
 inline const char* followReason(FollowReason r){
     switch(r){
     case FollowReason::following:return "active player-follow intent";
@@ -80,6 +80,7 @@ inline const char* followReason(FollowReason r){
     case FollowReason::airCombat:return "retain established follower flight for native combat";
     case FollowReason::groundCombat:return "native ground combat requested";
     case FollowReason::takeoffPreparation:return "retain follow during requested native takeoff stance transition";
+    case FollowReason::relationship:return "retain airborne current follower while the leader flies (follower framework idle/sandbox package)";
     default:return "no current player-follow evidence";
     }
 }
@@ -102,6 +103,11 @@ inline FollowDecision followDecision(FollowEvidence e){
     if(e.ownedFlight&&e.continuingRelationship&&e.temporaryAction)return {true,FollowReason::temporaryAnimation};
     if(e.scene)return {false,FollowReason::scene};
     if(e.targetIsPlayer||e.teammateTravel||e.managedTravel)return {true,FollowReason::following};
+    // Follower frameworks (e.g. NFF Relax) swap in sandbox/idle packages when the
+    // leader seems idle; a hovering leader is neither running nor sprinting. Keep
+    // an already-airborne current follower with its flying leader. Wait, dismissal,
+    // scenes, hostility, a new follow target and combat are all decided above.
+    if(e.ownedFlight&&e.continuingRelationship)return {true,FollowReason::relationship};
     return {};
 }
 inline bool followsPlayer(FollowEvidence e){

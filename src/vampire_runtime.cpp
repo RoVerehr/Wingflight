@@ -1,4 +1,5 @@
 #include "vampire_runtime.hpp"
+#include "actor_state.hpp"
 #include "logging.hpp"
 #include "vampire_animation.hpp"
 #include "vampire_policy.hpp"
@@ -40,7 +41,7 @@ bool graphOf(const RE::Actor* actor){
 }
 std::uint64_t inspectVampireActor(const RE::Actor* a){
     std::uint64_t next=0;
-    if(a&&a->Is3DLoaded()&&!a->IsDead()&&!a->IsInRagdollState()&&a->GetRace()){
+    if(a&&a->Is3DLoaded()&&!a->IsDead()&&!knockedDown(a)&&a->GetRace()){
         auto race=a->GetRace();const bool vlrn=vlrnRaceKeyword&&race->HasKeyword(vlrnRaceKeyword);
         const bool known=race==nativeRace||vlrn;
         if(known){const bool nativeBody=graphOf(a);bool injected{};
@@ -94,7 +95,7 @@ struct VampireWingState : vampire::PlaybackState, std::enable_shared_from_this<V
     float peak{},bottom{},extended{},downEnd{.32f},wingPitch{};
     bool paused{};unsigned samples{};
 bool current(){auto actor=owner.get();return actor&&actor->GetRace()&&actor->GetRace()->GetFormID()==boundRace
-    &&actor->Is3DLoaded()&&!actor->IsDead()&&!actor->IsInRagdollState()&&!actor->IsInKillMove()&&root&&actor->Get3D(false)==root.get();}
+    &&actor->Is3DLoaded()&&!actor->IsDead()&&!knockedDown(actor)&&!actor->IsInKillMove()&&root&&actor->Get3D(false)==root.get();}
 void restore(){
     if(current())for(auto& b:bones)if(b.node&&b.wrote&&std::abs(legs::dot(rotation(b.node->local.rotate),b.output))>0.999999f)
         rotation(b.node->local.rotate,b.before);
@@ -152,7 +153,7 @@ WingPlayback playback(){
         .glideFrequency=clocks[1].rate,.activeSequence="Native Vampire Lord wing-only sampler"};
 }
 WingPlayback prepare(RE::Actor* actor){
-    if(!sceneInstalled||!actor||!actor->GetRace()||actor->IsDead()||actor->IsInRagdollState())return {};
+    if(!sceneInstalled||!actor||!actor->GetRace()||actor->IsDead()||knockedDown(actor))return {};
     std::lock_guard guard(stateLock);if(!load())return {};
     auto* object=actor->Get3D(false);if(!object)return {};
     if(root.get()!=object||ownerID!=actor->GetFormID()||boundRace!=actor->GetRace()->GetFormID()){
@@ -268,7 +269,7 @@ bool nativeVampireFlightEligible(const RE::Actor* a,bool ownedFlight){
     }
     if(!enabled||!isNativeVampireLord(a)||!(context.load()&4)||a->IsInKillMove())return false;
     // Bone presence/binding is validated at prepare before any flight starts.
-    if(!vampire::eligible(enabled,true,a->Is3DLoaded(),!a->IsDead(),a->IsInRagdollState(),true,true))return false;
+    if(!vampire::eligible(enabled,true,a->Is3DLoaded(),!a->IsDead(),knockedDown(a),true,true))return false;
     if(!usesVampireLordBehavior(a))return true; // Character graph has no native levitation stance.
     bool levitating{};const bool readable=a->GetGraphVariableBool("isLevitating",levitating);
     static unsigned stanceSamples{};

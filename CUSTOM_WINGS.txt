@@ -1,0 +1,353 @@
+Wingflight - Custom Wings
+=========================
+
+Custom Wings lets Wingflight fly with almost any wing model: a worn armor piece
+or the visual of an active magic effect. You register the wings once, pick an
+animation template, and tune the wingbeat in game. Wingflight never rewrites
+your meshes or animation files.
+
+Contents
+  1. Quick start (in game)
+  2. Registration files
+  3. Templates
+  4. Which bones are the wings
+  5. Authored animations (for wing authors)
+  6. Tuning the procedural wingbeat
+  7. Timing and sounds
+  8. Reloading, troubleshooting and older files
+
+
+1. Quick start (in game)
+------------------------
+
+  1. Equip or summon the wings on the player.
+  2. Open the Wingflight control panel, Custom Wings page, and click
+     Find Current Wings.
+  3. Pick your wings from the list. Only models that can actually be registered
+     are listed; clothing physics (skirts, loincloths) and static meshes are
+     left out.
+  4. Choose a template (see section 3). Wings that carry their own wingbeat
+     animation are offered as Authored automatically.
+  5. Click Apply and Save Registration, then fly and keep tuning. Each save
+     takes effect immediately.
+
+The saved rule is used from then on, after restarts too, and by NPCs wearing or
+casting the same wings. Unequipping the wings never deletes it.
+
+To change a rule later, select it under Saved registrations. Selecting the
+model in a new scan starts a fresh draft with template defaults instead of
+your tuned values.
+
+
+2. Registration files
+---------------------
+
+Each rule is one INI in Data/SKSE/Plugins/Wingflight/Wings/. The panel writes
+these for you; you can also write or edit them by hand. A minimal file:
+
+  [Wings]
+  Plugin=YourWings.esp
+  Armors=000800
+  Template=AWU
+
+  Plugin     The plugin that contains the wing armor or magic effect.
+  Armors     Armor FormIDs that trigger flight while worn.
+  Effects    Magic effect FormIDs that trigger flight while active. Use
+             Armors, Effects, or both.
+  Template   Authored, AWU, Fairy, VampireLord or Invisible (section 3).
+  RiseSpeed  Fairy only: climb speed while holding Jump, 0.1 to 100
+             (default 4).
+
+FormIDs are hexadecimal and local to the plugin, without the load-order prefix
+(000800, not 2A000800). Separate several IDs with commas. Owning the item is
+not enough; it has to be worn or the effect active.
+
+Write comments on their own lines. A comment after a value ("Up=50 ; note")
+is read as part of the value and breaks that setting.
+
+When you save over an existing rule, the previous version is kept as .bak
+(only the most recent one).
+
+
+3. Templates
+------------
+
+  Authored     Plays the wing model's own wingbeat animation. See section 5.
+  AWU          Procedural feather/dragon-style wingbeat. A good default for
+               most wings. It does not require AWU to be installed.
+  VampireLord  Procedural wingbeat that keeps the large wingbeat while
+               sprinting. It only selects a wing motion; it does not change
+               the character's race or body animations.
+  Fairy        Continuous fast flapping, also while descending. Hold Jump to
+               climb; sprinting speeds up the flapping. No Jump wingbeat boost.
+  Invisible    Wingbeat flight and sounds with no visible wings and no bone
+               animation. INI only; the scanner never creates it.
+
+The procedural templates are motion presets, not copies of AWU or Vampire Lord
+animation. They work on any skeleton, but always check the result in game and
+tune it to the model.
+
+
+4. Which bones are the wings
+----------------------------
+
+The scanner finds the wing bones and writes them for you:
+
+  [Model]
+  RootNode=WingAnchor
+  LeftRoots=LeftWingA,LeftWingB
+  RightRoots=RightWingA,RightWingB
+
+  RootNode    The bone all wing branches hang from.
+  LeftRoots   First bone of each left wing.
+  RightRoots  First bone of each right wing, in the same order as the left.
+
+Each left/right entry is one wing pair, up to 8 pairs and 128 bones in total.
+The order matters: per-pair settings (section 6) follow it. Leave the keys
+empty to let Wingflight detect the wings again.
+
+Use the bone names as they appear in the model (for example Bone01).
+Physics mods add prefixes such as hdtSSEPhysics_AutoRename_Armor_<number> at
+runtime; leave those out, Wingflight ignores them. Skeleton names with
+brackets, such as NPC Spine2 [Spn2], are fine.
+
+Only bones that actually move this model's wing mesh are used, so another
+outfit's bones are never picked up by mistake. Body bones are never animated.
+
+
+5. Authored animations (for wing authors)
+-----------------------------------------
+
+You can ship your own wingbeat animation inside the wing NIF, and Authored
+will play it on the registered wing bones, as equipment, as effect art and on
+NPCs alike. No behavior file (HKX) is needed.
+
+Wingflight uses three looping animations:
+
+  [Model]
+  ; Large wingbeat while hovering. Required.
+  PowerSequence=mAnimation4_Loop
+  ; Small wingbeat during sprint flight.
+  FastSequence=mAnimation4s
+  ; Flutter while gliding.
+  SpreadSequence=mAnimation1_Loop
+
+The defaults are the names used by AWU-format wings, so those need no extra
+keys. Name your own sequences whatever you like and list them here. If the
+sprint animation is missing, the hover animation is used for it; if the glide
+animation is missing, the sprint one is used.
+
+What the model needs:
+  - A NiControllerManager holding the sequences as NiControllerSequence
+    blocks, keyed with NiTransformInterpolator tracks on the wing bones.
+  - Tracks named after the wing bones. Bones without a track, and tracks for
+    other bones, keep the model's own motion.
+  - Only rotation is played; translation and scale keys are ignored.
+
+Timing:
+  - Each animation is stretched to fit Wingflight's wingbeat, so its length
+    is up to you. At normal speed one loop lasts 3.17 s (hover), 1 s (sprint)
+    and 0.53 s (glide); Wingflight speeds them up and slows them down as you
+    fly.
+  - Start the hover loop with the wings raised. Lift and the wingbeat sound
+    happen during the downstroke, which ends at DownstrokeEnd (default 0.32,
+    i.e. the first 32% of the loop). Shape the downstroke to match.
+
+Settings that still apply with Authored: ForwardTiltDegrees, BlendSeconds and
+PairDelaySeconds. The angle and articulation settings of section 6 do not.
+
+If the model has no usable hover animation, Authored falls back to the AWU
+procedural wingbeat and writes the reason to Wingflight.log. Wingflight only
+reads the animations; it never starts or edits them, and bundles no animation
+data of its own.
+
+
+6. Tuning the procedural wingbeat
+---------------------------------
+
+Everything here is in the [Animation] section and has a matching slider on
+the Custom Wings page. Angles are in degrees, relative to the model's pose
+when the wings are bound. Values outside the listed ranges are rejected.
+
+These are the AWU template defaults; other templates use different ones:
+
+  [Animation]
+  ForwardTiltDegrees=0
+  UpDegrees=50
+  DownDegrees=-35
+  SpreadDegrees=0
+  FastAmplitude=0.25
+  FlutterDegrees=5
+  FlutterPeriodSeconds=0.5
+  FlowStrength=0.7
+  TipDelaySeconds=0.16
+  JointFactor=0.15
+  JointDelaySeconds=0.06
+  BottomHold=0.2
+  FoldDegrees=60
+  FoldCenter=0.5
+  StrokeBendDegrees=35
+  StrokeBendCenter=0.3
+  FeatherDegrees=20
+  PairDelaySeconds=0
+  PairScales=1
+  NativeSwayWeight=0.15
+  BlendSeconds=0.3
+  AxisHeadingDegrees=0
+  AxisTiltDegrees=0
+
+Wingbeat range
+  UpDegrees, DownDegrees (-180..180)   Raised and lowered wing angle
+                                       (panel: Raised / Lowered wing angle).
+  ForwardTiltDegrees (-180..180)       Tilts both whole wings forward
+                                       (positive) or back (negative), along
+                                       with the plane they beat in.
+  FastAmplitude (0..2)                 Size of the small sprint wingbeat,
+                                       as a multiplier.
+
+Gliding
+  SpreadDegrees (-180..180)            Wing angle while gliding or descending
+                                       with spread wings.
+  FlutterDegrees (0..60)               Sway to either side of that angle.
+  FlutterPeriodSeconds (0.04..10)      One full sway; shorter is faster.
+                                       Fairy uses it as its wingbeat period.
+
+Flexibility
+  FlowStrength (0..1)                  How much the wing bends from root to
+                                       tip, following the actual wingbeat
+                                       (panel: Wing flexibility).
+  TipDelaySeconds (0..0.5)             How long the motion takes to reach the
+                                       tip (panel: Root-to-tip delay).
+  JointFactor (0..1),                  Older flexibility controls, used only
+  JointDelaySeconds (0..0.5)           when FlowStrength is 0.
+  Fairy has flexibility off by default.
+
+Articulation (panel: Wingbeat articulation)
+  Real wings do not swing like a hinge. The raised wing is folded, the
+  downstroke spreads it, the wing pauses at the bottom, and recovery folds it
+  again. These values add that shape. Set them all to 0 for a plain hinge.
+  FoldDegrees (-180..180)              Fold when raised. Negative folds the
+                                       other way.
+  FoldCenter (0.1..0.9)                Where the fold happens: 0 root, 1 tip.
+  StrokeBendDegrees (-180..180)        Bend when lowered: the wing curls down
+                                       and inward at the bottom of the stroke,
+                                       without a larger DownDegrees.
+  StrokeBendCenter (0.1..0.9)          Where that bend happens.
+  FeatherDegrees (-90..90)             Feather trail: the outer wing trails
+                                       behind during recovery.
+  BottomHold (0..0.45)                 Pause when lowered, as a fraction of
+                                       the wingbeat.
+  Sprinting uses a little of the fold and feather; gliding stays spread.
+  Fairy ignores these values. Lift and sound timing do not change.
+
+Wing pairs (panel: Wing pairs, shown for wings with more than one pair)
+  PairDelaySeconds (0..0.5)            Comma-separated, one value per pair in
+  PairScales (0..2)                    LeftRoots order, e.g. 0.06,0,0.12 and
+                                       1,0.8,0.6. Delay lets the motion travel
+                                       from pair to pair; scale makes a pair
+                                       beat larger or smaller. Missing entries
+                                       mean 0 and 1.
+
+Rotation direction (panel: Wing rotation direction)
+  AxisHeadingDegrees (-180..180),      The axis the wings beat around, relative
+  AxisTiltDegrees (-90..90)            to the back. Heading 0 / tilt 0 gives
+                                       ordinary up/down flapping, heading 90
+                                       the sideways axis, tilt 90 the vertical
+                                       axis. Combine them for twisting or
+                                       sweeping strokes. The right wing is
+                                       mirrored automatically, and the motion
+                                       stays relative to the back while the
+                                       body leans, banks or turns.
+
+Blending
+  NativeSwayWeight (0..1)              Keeps part of the model's own motion
+                                       (panel: Original sway weight). 0 for
+                                       fully procedural motion.
+  BlendSeconds (0.02..3)               Smooths takeoff, landing and setting
+                                       changes. It does not shrink the
+                                       wingbeat.
+
+
+7. Timing and sounds
+--------------------
+
+  [Timing]
+  DownstrokeEnd=0.32
+
+DownstrokeEnd (0.1..0.7) is where the downstroke ends, as a fraction of the
+hover wingbeat. Lift and the wingbeat sound are timed to it.
+
+With AWU installed, newly registered wings use AWU's sounds:
+
+  [Sound]
+  Plugin=Animated Wings Ultimate.esp
+  PowerStroke=000C6B
+  FastFlap=000C6C
+  SpreadFlutter=000C6A
+  MarkerPhase=0.1894737
+  FastMarkerPhase=0.20
+  SpreadMarkerPhase1=0.25
+  SpreadMarkerPhase2=0.75
+  SpreadVolume=1
+
+Without AWU, they use the Dawnguard Vampire Lord wingbeat for both the hover
+and the sprint wingbeat, and gliding is silent:
+
+  [Sound]
+  Plugin=Dawnguard.esm
+  PowerStroke=019D7F
+  FastFlap=019D7F
+  SpreadFlutter=000000
+  MarkerPhase=0.08
+  FastMarkerPhase=0.20
+
+  Plugin           The plugin the sound IDs belong to. It can differ from the
+                   wings' own plugin.
+  PowerStroke, FastFlap, SpreadFlutter
+                   Sound descriptor IDs for the hover wingbeat, the sprint
+                   wingbeat and the glide flutter. 000000 mutes one. With
+                   Dawnguard.esm and no FastFlap line, FastFlap is 019D7F.
+  MarkerPhase      When the hover wingbeat sound plays; must come before
+                   DownstrokeEnd.
+  FastMarkerPhase  When the sprint wingbeat sound plays (0..1).
+  SpreadMarkerPhase1, SpreadMarkerPhase2
+                   The two flutter sounds per glide sway, in order (0..1).
+  SpreadVolume     Glide flutter volume (0..1).
+
+Fairy wings do not use the hover/sprint wingbeat sounds. Wingflight ships no
+sounds of its own; these refer to sounds from installed plugins.
+
+A file that already uses AWU's sounds does not switch by itself when AWU is
+removed. Replace the whole [Sound] section with the Dawnguard example above.
+Sound IDs only make sense together with their own plugin, so never copy an ID
+to a different Plugin.
+
+
+8. Reloading, troubleshooting and older files
+---------------------------------------------
+
+Edited an INI while the game is running? Land and leave flight, then click
+Reload Registration INIs. Select the rule again under Saved registrations
+before using the panel, so the panel does not save an older draft over your
+edits. Restarting
+the game reloads them as well. These files are separate from Wingflight.ini.
+
+If wings do not animate, a model is missing from the scan, or Authored falls
+back to the procedural wingbeat, check Wingflight.log. Turn on Detailed
+Logging in the control panel (or [General] DetailedLogging=1 in Wingflight.ini)
+for more detail. Warnings and errors are always logged.
+
+The wings are rebound automatically when equipment changes; no rescan is
+needed.
+
+Older files:
+  - Registrations saved before articulation existed keep their previous plain
+    hinge motion: missing articulation keys count as 0 for the procedural
+    templates. Choosing AWU or VampireLord in the panel fills in the new
+    defaults. Authored keeps the AWU defaults for its fallback.
+  - StrokeBendCenter, when missing, equals FoldCenter.
+  - Bone names with physics prefixes are cleaned up when the file is read.
+  - AxisMode, AxisX/Y/Z and the old remembered axis sets are no longer read.
+    Only AxisHeadingDegrees and AxisTiltDegrees are used.
+  - Older Wingflight INIs without a [Wings] Template key keep their original
+    behavior, including Compatibility=AWU/None and AnimationDriver=Runtime/None.

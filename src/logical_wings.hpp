@@ -11,6 +11,9 @@ struct LogicalWings {
     static constexpr float duration=3.166667f,fastDuration=1,spreadDuration=0.533333f;
     WaveWeights weights{0,0,0,1};
     void reset(float entry=0.233333f){*this={};fastPhase=entry;}
+    // A new flight starts its stroke from the raised pose, as a fresh binding
+    // does. Weights are kept so a visible blend continues without a snap.
+    void restart(float entry=0.233333f){const auto kept=weights;reset(entry);weights=kept;}
     void advance(float dt){
         if(!std::isfinite(dt)||dt<=0)return;dt=std::min(dt,0.1f);
         phase=std::fmod(phase+dt*rate/duration,1.0f);

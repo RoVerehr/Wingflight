@@ -50,7 +50,6 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
     cfg.glideEnabled=integer("Glide","Enabled",1,1)!=0;
     cfg.logSamples = integer("General", "DetailedLogging", 0, 1) != 0;
     cfg.lowerBodyEnabled=integer("LowerBody","Enabled",1,1)!=0;
-    cfg.lowerBodyLogClips=integer("LowerBody","LogAnimations",1,1)!=0;
     cfg.lowerBodyBlendIn=number(file,"LowerBody","BlendInSeconds",0.30f,0.05f,2);
     cfg.lowerBodyBlendOut=number(file,"LowerBody","BlendOutSeconds",0.25f,0.05f,2);
     auto& relaxation=cfg.legRelaxation;
@@ -66,6 +65,7 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
     cfg.muteFlightSprintBreath=integer("Compatibility","MuteFlightSprintBreath",1,1)!=0;
     cfg.armedFlightIdle=integer("Compatibility","ArmedFlightIdle",1,1)!=0;
     cfg.disableSprintWhenArmed=integer("Flight","DisableSprintWhenArmed",0,1)!=0;
+    cfg.tuning.endFlightOnGround=integer("Flight","EndFlightOnGround",1,1)!=0;
     cfg.poseWhenArmed = integer("Compatibility", "PoseWhenWeaponsDrawn", 1, 1) != 0;
     cfg.modeKey = integer("Keyboard", "CycleMode", 37, 255);
     cfg.landKey = integer("Keyboard", "Land", 46, 255);
@@ -122,6 +122,9 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
     }
     std::sort(paths.begin(), paths.end());
     for (const auto& path : paths) {
+        // New registrations have their own parser and stable runtime storage.
+        // Legacy providers keep their existing defaults and AWU handoff rules.
+        if(!read(path,"Wings","Template","").empty())continue;
         WingProfile profile;
         profile.id = path.stem().string();
         profile.plugin = read(path, "Wings", "Plugin", "");

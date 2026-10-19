@@ -15,6 +15,7 @@ inline Mode savedMode(int value) { return value==1 || value==2 ? Mode::free : Mo
 inline constexpr float highSpeedHeightCorrectionSpeed=4.0f;
 struct Tuning {
     bool flapOnHighSpeedEntry{true};
+    bool endFlightOnGround{true};
     float speed{7.0f}, acceleration{4.0f}, drag{2.5f};
     float sprintSpeedMultiplier{1.50f};
     float turnResponse{12.0f};
@@ -84,7 +85,7 @@ public:
     bool glideOnly() const { return active_&&glideOnly_; }
     bool highSpeed() const { return highSpeed_; }
     bool descentGlide() const { return flying()&&!continuous_&&mode_==Mode::free&&!highSpeed_&&controlledDescent_; }
-    bool automaticHover() const { return flying()&&!continuous_&&mode_==Mode::free&&!highSpeed_&&!controlledDescent_; }
+    bool automaticHover() const { return flying()&&!groundRetained_&&!continuous_&&mode_==Mode::free&&!highSpeed_&&!controlledDescent_; }
     bool continuousFlight() const { return flying()&&continuous_; }
     void setContinuousFlight(bool enabled) {
         if(continuous_==enabled)return;
@@ -104,6 +105,18 @@ public:
         return automaticHover()?autoHover_.requestDelay(velocity_.z,t.gravity,lead,downSeconds,t.autoFlapImpulse):-1;
     }
     bool readyToLand() const { return active_ && (glideOnly_ || (leftGround_ && age_ > 0.1f)); }
+    bool retainGroundContact(bool supported,const Tuning& t) const { return flying()&&supported&&!t.endFlightOnGround; }
+    // Cosmetic gates must retain full-flight poses/audio on a floor without
+    // falsifying the supporting surface used by physics, damage or landing.
+    bool presentationSupported(bool supported,const Tuning& t) const { return supported&&!retainGroundContact(supported,t); }
+    // A real floor absorbs descent; it must not store a dive or an old altitude
+    // correction. Keep upward manual lift and horizontal flight movement intact.
+    void groundContact(float height) {
+        if(!flying())return;
+        groundRetained_=true;velocity_.z=std::max(0.0f,velocity_.z);
+        hoverAnchor_=false;hoverIntegral_=0;autoHover_.reset();
+        if(std::isfinite(height)){hoverHeight_=height;autoHover_.observe(height);}
+    }
     void restoreMode(Mode mode) { mode_ = mode; hoverAnchor_=false; }
     void reset() { *this = Flight{}; }
     void begin(Vec3 velocity, bool takeoff, const Tuning& t) {
@@ -130,8 +143,10 @@ public:
             return result; }
         dt = std::min(dt, 0.1f);  // Never catch up a loading hitch with a large impulse.
         age_ += dt; cooldown_ = std::max(0.0f, cooldown_ - dt);
+        groundRetained_=retainGroundContact(observed.supported,t);
+        if(groundRetained_)groundContact(observed.height);
         if (!observed.supported) { leftGround_ = true; }
-        if (observed.supported && age_ > 0.3f && (velocity_.z <= 0 || age_ > 1.0f)) {
+        if (!groundRetained_ && observed.supported && age_ > 0.3f && (velocity_.z <= 0 || age_ > 1.0f)) {
             contact_ += dt;
             if (contact_ >= 0.06f && (leftGround_ || age_ > 1.0f)) {
                 reset(); result.landed = true; return result;
@@ -266,7 +281,7 @@ public:
             if(controlledDescent_) {
                 // Cap downward momentum only; Space lift must remain effective.
                 velocity_.z=std::max(velocity_.z,-t.glideFall);
-            } else if(!observed.wingBusy&&!result.flapped
+            } else if(!groundRetained_&&!observed.wingBusy&&!result.flapped
                 &&autoHover_.due(velocity_.z,t.gravity,observed.autoLeadSeconds,
                     observed.autoDownstrokeSeconds,t.autoFlapImpulse)) {
                 if(observed.stamina-result.cost-observed.reservedAutoStamina>=t.autoFlapCost) {
@@ -293,11 +308,13 @@ public:
             const float limit=t.speed*horizontalScale+highSpeedHeightCorrectionSpeed;
             velocity_.z=std::clamp(climb+4.0f*error+hoverIntegral_,-limit,limit);
         }
+        if(groundRetained_)velocity_.z=std::max(0.0f,velocity_.z);
         return result;
     }
     // Called once per rendered downstroke sample, after the animation policy.
     // No timer fallback: an absent/held/hidden clip cannot produce phantom lift.
     void applyWingLift(float fraction, bool firstSample, const Tuning& t,bool automatic=false) {
+        if(automatic&&groundRetained_)return;
         if (!active_ || glideOnly_ || highSpeed_ || continuous_ || !std::isfinite(fraction) || fraction<=0) { return; }
         if(mode_==Mode::free){
             // Descend suppresses automatic lift, never a requested Space stroke.
@@ -331,7 +348,7 @@ public:
         mode_=Mode::flap;autoHover_.reset();controlledDescent_=false;velocity_.z=std::max(velocity_.z,-t.glideFall);
     }
 private:
-    bool active_{}, leftGround_{},glideOnly_{},highSpeed_{},continuous_{};
+    bool active_{}, leftGround_{},glideOnly_{},highSpeed_{},continuous_{},groundRetained_{};
     bool entryFlapPending_{};
     bool controlledDescent_{};
     bool reversing_{};

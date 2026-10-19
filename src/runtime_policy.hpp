@@ -16,6 +16,16 @@ constexpr Backend select(std::uint16_t major,std::uint16_t minor,std::uint16_t b
     for(const auto& v:supportedVersions)if(v.major==major&&v.minor==minor&&v.build==build&&v.revision==revision)return v.backend;
     return Backend::unsupported;
 }
+// SKSE's packed low nibble is a store type, unlike the executable file revision
+// used by REL::Module and Address Library filenames. Only known GOG builds use 1.
+constexpr std::uint16_t skseStoreType(Backend backend) {
+    return backend==Backend::gog659||backend==Backend::gog1179?1:0;
+}
+constexpr Backend selectSKSE(std::uint16_t major,std::uint16_t minor,std::uint16_t build,std::uint16_t storeType) {
+    for(const auto& v:supportedVersions)
+        if(v.major==major&&v.minor==minor&&v.build==build&&skseStoreType(v.backend)==storeType)return v.backend;
+    return Backend::unsupported;
+}
 constexpr const char* name(Backend backend) {
     switch(backend) {
     case Backend::steam1597:return "1.5.97";

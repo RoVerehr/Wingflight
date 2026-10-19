@@ -1,7 +1,7 @@
 #pragma once
 #include <string_view>
 namespace wingflight {
-inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.4.0-4. Startup updates this layout and comments.
+inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.4.0-6. Startup updates this layout and comments.
 ; Recognized settings are retained; replaced INIs are backed up beside this file.
 ; Mod Control Panel: Flight, NPC Flight, FreeFlight, Stamina, Jump, Lower Body tuning and controls apply/save live.
 ; Other settings remain startup-only. External INI edits still require a restart.
@@ -11,6 +11,7 @@ Enabled=1
 ; Apply/save live in Mod Control Panel / Logging. Off by default.
 ; 0: initialization, compatibility decisions, warnings and errors only.
 ; 1: also record flight, wings, animation, NPC and combat details in Wingflight.log.
+; Includes distinct lower-body clip paths (max 256 per launch) for LowerBodyExceptions.txt.
 ; Replaces the old DiagnosticSamples switch; its old value is intentionally retired.
 DetailedLogging=0
 
@@ -53,6 +54,11 @@ Descend=0
 Deadzone=0.2
 
 [Flight]
+; Apply/save live. 1: normal ground contact ends full flight (default).
+; 0: retain flight on the ground; Jump lifts off again, Exit Flight releases it.
+; Automatic lift pauses on the ground. Held-Jump glide still lands normally.
+; Damaging collisions and other flight interruptions still end flight.
+EndFlightOnGround=1
 ; Controller velocity units (Havok); tune in game after basic collision tests.
 Speed=7.00
 ; Native actor sprint state selects this horizontal multiplier in all flight modes.
@@ -96,7 +102,8 @@ MuteFlightSprintBreath=1
 AWU=1
 ; Keep custom weapon idle during flight: graph walk/run weights and visual sprint requests are suppressed.
 ArmedFlightIdle=1
-; Suppress airborne foot contacts and direct foot SoundPlay annotations; physical landings remain native.
+; Suppress foot contacts and direct foot SoundPlay annotations during flight, including retained ground contact.
+; Ordinary ground movement and real landings after flight exit remain native.
 MuteFlightFootsteps=1
 ; Use the resource's drawn-weapon / spell-hand flight poses too.
 ; Custom BFCO/MCO attack slots keep their own animations unless separately adapted.
@@ -246,7 +253,8 @@ HoldSeconds=0.25
 
 [LowerBody]
 ; Lower Body tuning applies live through Mod Control Panel / Apply and Save.
-; Direct INI edits require a restart. Enabled and LogAnimations remain startup-only.
+; Direct INI edits require a restart. Enabled remains startup-only.
+; Animation path logging follows General/DetailedLogging and applies live.
 ; Armed full flight only: preserve some authored thigh motion and add bounded knee inertia.
 ; 0 uses the selected flight animation legs without thigh retention or secondary swing.
 RelaxedArmedLegs=1
@@ -278,7 +286,5 @@ SwingInertia=2.00
 Enabled=1
 BlendInSeconds=0.30
 BlendOutSeconds=0.25
-; Logs distinct actual clip paths (max 256 per launch) for LowerBodyExceptions.txt.
-LogAnimations=1
 )WF_INI";
 }

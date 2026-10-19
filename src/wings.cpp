@@ -25,6 +25,10 @@ void clearContinuousBinding(){
 }
 }
 void Wings::prepareContinuousAnimation(WingMatch match,bool active,bool highSpeed,float fastMultiplier,float dt){
+    if(registeredWing(match.profile)){
+        if(match.profile->continuousFlight&&active&&registered_.prepare(match).found){registered_.blend(0,1,0);registered_.loopRate(highSpeed?fastMultiplier:1.f,1);}
+        return;
+    }
     if(!active||!match.profile||!match.profile->continuousFlight||!wingEventActor(match.owner,match.effect)
         ||!match.effect->hitEffects){clearContinuousBinding();return;}
     std::array<RE::BSTSmartPointer<RE::BShkbAnimationGraph>,16> graphs;
@@ -98,9 +102,14 @@ void observeContinuousWingClip(const RE::hkbClipGenerator* clip,float before,flo
             clip->name.c_str(),rate,clip->playbackSpeed,before,clip->localTime,dt);
 }
 bool Wings::initialize(float amplitude){artReady_=runtime_.install(amplitude);return artReady_;}
-void Wings::advanceVisual(float delta){runtime_.advance(delta);advanceVampireWings(delta);if(logicalActive_)logical_.advance(delta);}
-void Wings::clearVisual(bool smooth){clearContinuousBinding();strokeSound_.reset();fastSound_.reset();flutterSound_.reset();runtime_.release(smooth);releaseVampireWings(smooth);nativeActive_=logicalActive_=false;logical_.reset();}
+void Wings::advanceVisual(float delta){runtime_.advance(delta);registered_.advance(delta);advanceVampireWings(delta);if(logicalActive_)logical_.advance(delta);}
+void Wings::clearVisual(bool smooth){clearContinuousBinding();strokeSound_.reset();fastSound_.reset();flutterSound_.reset();runtime_.release(smooth);registered_.release(smooth);releaseVampireWings(smooth);nativeActive_=logicalActive_=registeredActive_=false;logical_.reset();}
 WingPlayback Wings::prepareVisual(WingMatch match){
+    if(registeredWing(match.profile)){
+        if(!registeredActive_){runtime_.release(false);releaseVampireWings(false);logicalActive_=nativeActive_=false;registeredActive_=true;}
+        return registered_.prepare(match);
+    }
+    if(registeredActive_){registered_.release(false);registeredActive_=false;}
     if(match.profile&&match.profile->animationless) {
         WingPlayback out;if(!wingEventActor(match.owner,match.effect))return out;
         if(!logicalActive_) {
@@ -138,6 +147,7 @@ WingPlayback Wings::prepareVisual(WingMatch match){
     return runtime_.prepare(match);
 }
 bool Wings::setBlend(WingMatch match,float flap,float ownership,float fast)const{
+    if(registeredWing(match.profile))return registered_.blend(flap,ownership,fast);
     if(match.profile&&match.profile->animationless) {
         if(!wingEventActor(match.owner,match.effect))return false;
         const_cast<Wings*>(this)->logical_.blend(flap,ownership,fast);return true;
@@ -147,16 +157,17 @@ bool Wings::setBlend(WingMatch match,float flap,float ownership,float fast)const
     if(!match.profile||!wingEventActor(match.owner,match.effect))return false;
     return const_cast<WingRuntime&>(runtime_).blend(flap,ownership,fast);
 }
-bool Wings::parkInvisibleFlap(){return logicalActive_?logical_.parkPower():nativeActive_?parkVampirePower():runtime_.parkPower();}
+bool Wings::parkInvisibleFlap(){return registeredActive_?registered_.parkPower():logicalActive_?logical_.parkPower():nativeActive_?parkVampirePower():runtime_.parkPower();}
 bool Wings::setJumpPreview(WingMatch match,float amount,float period,float amplitude){
     if(!match.profile||!match.profile->awuCompatibility||match.profile->nativeVampire||match.profile->continuousFlight||match.profile->animationless)return false;
     return prepareVisual(match).found&&runtime_.preview(amount,period,amplitude);
 }
-bool Wings::parkInvisibleGlide(){return logicalActive_?logical_.parkFast():nativeActive_?parkVampireFast():runtime_.parkFast();}
-void Wings::setFlapRate(float rate){if(logicalActive_)logical_.powerRate(rate);else if(nativeActive_)rateVampireWings(rate);else runtime_.powerRate(rate);}
-void Wings::updateGlideRate(float fast,float spread){if(logicalActive_)logical_.loopRate(fast,spread);else if(nativeActive_)loopRateVampireWings(fast,spread);else runtime_.loopRate(fast,spread);}
-void Wings::updatePowerPitch(float degrees){if(logicalActive_)return;if(nativeActive_)pitchVampireWings(degrees);else runtime_.pitch(degrees);}
+bool Wings::parkInvisibleGlide(){return registeredActive_?registered_.parkFast():logicalActive_?logical_.parkFast():nativeActive_?parkVampireFast():runtime_.parkFast();}
+void Wings::setFlapRate(float rate){if(registeredActive_)registered_.powerRate(rate);else if(logicalActive_)logical_.powerRate(rate);else if(nativeActive_)rateVampireWings(rate);else runtime_.powerRate(rate);}
+void Wings::updateGlideRate(float fast,float spread){if(registeredActive_)registered_.loopRate(fast,spread);else if(logicalActive_)logical_.loopRate(fast,spread);else if(nativeActive_)loopRateVampireWings(fast,spread);else runtime_.loopRate(fast,spread);}
+void Wings::updatePowerPitch(float degrees){if(registeredActive_){registered_.pitch(degrees);return;}if(logicalActive_)return;if(nativeActive_)pitchVampireWings(degrees);else runtime_.pitch(degrees);}
 void Wings::resolve(const Configuration& cfg) {
+    loadWingRegistrations();
     effects_.clear();
     sounds_.clear();
     fastSounds_.clear();
@@ -214,8 +225,13 @@ void Wings::resolve(const Configuration& cfg) {
     }
 }
 void Wings::updatePowerSound(WingMatch match,const WingPlayback& playback){
+    if(registeredWing(match.profile)){
+        auto resolve=[&](auto& map,std::uint32_t id){if(id&&!map.contains(match.profile))if(auto sound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(id,match.profile->soundPlugin))map.emplace(match.profile,sound);};
+        resolve(sounds_,match.profile->flapSoundID);resolve(fastSounds_,match.profile->fastSoundID);resolve(spreadSounds_,match.profile->spreadSoundID);
+    }
     if(match.profile&&match.profile->continuousFlight){strokeSound_.reset();fastSound_.reset();flutterSound_.reset();return;}
-    if(!match.profile||(match.profile->nativeVampire?!isNativeVampireLord(match.owner):!wingEventActor(match.owner,match.effect))){strokeSound_.reset();fastSound_.reset();flutterSound_.reset();return;}
+    const bool effectless=registeredWing(match.profile)&&(!match.profile->armorIDs.empty()||match.profile->animationless);
+    if(!match.profile||(match.profile->nativeVampire?!isNativeVampireLord(match.owner):!wingSoundActor(match.owner,match.effect,effectless))){strokeSound_.reset();fastSound_.reset();flutterSound_.reset();return;}
     const auto& profile=*match.profile;
     const bool power=strokeSound_.update(playback.found&&playback.active,playback.phase,
         playback.flapWeight,playback.frequency,profile.flapSoundPhase,profile.timing.downstrokeEnd);
@@ -252,6 +268,7 @@ WingMatch Wings::find(RE::Actor* actor,bool ownedFlight) const {
         bool stance{};
         if(!actor->GetGraphVariableBool("isLevitating",stance)||(!stance&&!ownedFlight))return {};
     }
+    if(const auto registered=findRegisteredWings(actor);registered.profile)return registered;
     WingMatch art,invisible;
     const auto active = actor->AsMagicTarget()->GetActiveEffectList();
     if (active&&artReady_)for (auto effect : *active) {
@@ -285,6 +302,7 @@ WingMatch Wings::find(RE::Actor* actor,bool ownedFlight) const {
     return {};
 }
 bool Wings::send(WingMatch match,const std::string& event)const{
+    if(registeredWing(match.profile))return event==match.profile->land||event==match.profile->fall||const_cast<Wings*>(this)->prepareVisual(match).found;
     if(match.profile&&match.profile->nativeVampire){
         if(event==match.profile->land||event==match.profile->fall)return true;
         return const_cast<Wings*>(this)->prepareVisual(match).found;

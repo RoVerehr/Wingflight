@@ -1,4 +1,5 @@
 #include "actor_flight.hpp"
+#include "actor_state.hpp"
 #include "actor_combat_policy.hpp"
 #include "actor_spell_aim_policy.hpp"
 #include "vampire_runtime.hpp"
@@ -117,6 +118,7 @@ struct ActorFlight {
     GravityLease gravity;
     aerial::Motion motion;
     WingRuntime visual;
+    RegisteredWingRuntime registeredWings;
     VampireWingRuntime nativeWings;
     LogicalWings logical;
     using WingGraphs=std::vector<RE::BSTSmartPointer<RE::BShkbAnimationGraph>>;
@@ -249,7 +251,7 @@ void npcChannels(RE::IPostAnimationChannelUpdateFunctor* functor){
 }
 
 Vec3 position(RE::Actor* a){const auto p=a->GetPosition();const float scale=RE::bhkWorld::GetWorldScale();return {p.x*scale,p.y*scale,p.z*scale};}
-bool safe(RE::Actor* a){return a&&a->Is3DLoaded()&&!a->IsDisabled()&&!a->IsDead()&&!a->IsInRagdollState()&&!a->IsInKillMove()
+bool safe(RE::Actor* a){return a&&a->Is3DLoaded()&&!a->IsDisabled()&&!a->IsDead()&&!knockedDown(a)&&!a->IsInKillMove()
     &&a->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth)>0&&a->GetCharController();}
 bool movableNPC(RE::Actor* a){const auto state=a?a->AsActorState():nullptr;return safe(a)&&state&&a->IsAIEnabled()&&!a->IsOnMount()
     &&!state->IsSwimming()&&!state->IsBleedingOut()&&!state->IsUnconscious()
@@ -317,7 +319,10 @@ FollowObservation follows(RE::Actor* a,RE::PlayerCharacter* p,bool ownedManagedI
     FollowObservation result;
     result.evidence={movableNPC(a)&&sameSpace(a,p),partyWaiting||a->AsActorValueOwner()->GetActorValue(RE::ActorValue::kWaitingForPlayer)>0,
         scene!=nullptr,a->IsHostileToActor(p),target.get()==p,teammate&&travel&&(!target||target.get()==p),managed,
-        ownedFlight,teammate||member||baseTravel,scene||(once&&once!=basePackage),target&&target.get()!=p};
+        ownedFlight,teammate||member||baseTravel,scene||(once&&once!=basePackage),
+        // Another actor, or a marker the current package actually travels to. A
+        // sandbox/idle package's leftover marker reference is not a new follow order.
+        target&&target.get()!=p&&(travel||target->As<RE::Actor>()!=nullptr)};
     result.evidence.inCombat=a->IsInCombat();result.evidence.airCombat=settings->actors.airCombat;
     result.evidence.preparingFlight=preparingFlight;
     if(result.evidence.inCombat&&target){
@@ -481,7 +486,7 @@ bool groundContact(RE::bhkCharacterController* c){
         c->surfaceInfo.surfaceNormal.quad.m128_f32[2],c->surfaceInfo.surfaceDistanceExcess);
 }
 void recoverGroundWings(ActorFlight& s,RE::Actor* a,WingMatch match,float dt){
-    s.visual.advance(dt);s.recoveryAge=std::max(0.f,s.recoveryAge-dt);
+    s.visual.advance(dt);s.registeredWings.advance(dt);s.recoveryAge=std::max(0.f,s.recoveryAge-dt);
     if(!match.profile||!match.profile->awuCompatibility||match.profile->continuousFlight||!match.effect||!match.effect->hitEffects)return;
     bool flutter=false;
     const auto table=REL::Relocation<std::uintptr_t>(RE::VTABLE_hkbStateMachine[0]).address();
@@ -536,7 +541,7 @@ void stop(ActorFlight& s,RE::Actor* a,const char* reason,bool landed=false){
         const auto current=providers->find(a,true);
         if(current.profile==s.profile&&current.effect==s.effect)artEvent(current,"MTState");
     }
-    s.owned=false;s.nativeWingAudio=false;s.descending=false;s.motion.reset();s.altitude.reset();s.strokes.reset();s.visual.release(landed);s.nativeWings.release(landed);s.logical.reset();s.continuousRate=0;s.bound=false;s.wingGraphs.store(nullptr);
+    s.owned=false;s.nativeWingAudio=false;s.descending=false;s.motion.reset();s.altitude.reset();s.strokes.reset();s.visual.release(landed);s.registeredWings.release(landed);s.nativeWings.release(landed);s.logical.reset();s.continuousRate=0;s.bound=false;s.wingGraphs.store(nullptr);
     {std::lock_guard guard(s.spellAimLock);s.spellAim={};}
     releaseMovementControl(s,a);
     s.combatSession={};s.combatSpacing={};s.rangedRetreat={};s.combatAction=aerial::CombatAction::follow;s.combatTarget={};s.combatStyle=aerial::CombatStyle::unknown;
@@ -568,9 +573,10 @@ void bindContinuous(ActorFlight& s,WingMatch match){
 }
 bool bind(ActorFlight& s,RE::Actor* a,WingMatch match){
     bool hasVariable{};if(!a->GetGraphVariableBool("Wingflight_IsFlying",hasVariable))return false;
-    if(s.recoveryAge>0){s.visual.release(false);s.nativeWings.release(false);s.recoveryAge=0;s.groundRecovery.reset();}
+    if(s.recoveryAge>0){s.visual.release(false);s.registeredWings.release(false);s.nativeWings.release(false);s.recoveryAge=0;s.groundRecovery.reset();}
     s.visual.install(settings->spreadAmplitudeMultiplier);
-    if(match.profile->continuousFlight){bindContinuous(s,match);const auto graphs=s.wingGraphs.load();if(!graphs||graphs->empty())return false;}
+    if(registeredWing(match.profile)){if(!s.registeredWings.prepare(match).found)return false;}
+    else if(match.profile->continuousFlight){bindContinuous(s,match);const auto graphs=s.wingGraphs.load();if(!graphs||graphs->empty())return false;}
     else if(match.profile->animationless)s.logical.reset(match.profile->timing.glideEntryPhase);
     else if(match.profile->nativeVampire){if(!s.nativeWings.prepare(a).found)return false;}
     else if(!match.profile->nativeVampire){const auto visual=s.visual.prepare(match);if(!visual.found)return false;}
@@ -581,9 +587,9 @@ bool bind(ActorFlight& s,RE::Actor* a,WingMatch match){
     installChannels(a);
     s.channelOwner=a->AsIPostAnimationChannelUpdateFunctor();
     s.powerSound=s.cruiseSound=s.spreadSound=nullptr;
-    if(match.profile->flapSoundID)s.powerSound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->flapSoundID,match.profile->plugin);
-    if(match.profile->fastSoundID)s.cruiseSound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->fastSoundID,match.profile->plugin);
-    if(match.profile->spreadSoundID)s.spreadSound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->spreadSoundID,match.profile->plugin);
+    if(match.profile->flapSoundID)s.powerSound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->flapSoundID,match.profile->soundPlugin.empty()?match.profile->plugin:match.profile->soundPlugin);
+    if(match.profile->fastSoundID)s.cruiseSound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->fastSoundID,match.profile->soundPlugin.empty()?match.profile->plugin:match.profile->soundPlugin);
+    if(match.profile->spreadSoundID)s.spreadSound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->spreadSoundID,match.profile->soundPlugin.empty()?match.profile->plugin:match.profile->soundPlugin);
     s.lordBody=inspectVampireBody(a);
     s.nativeWingAudio=s.lordBody.load()&&match.profile->nativeVampire;
     if(s.nativeWingAudio.load())nativeWingAudio.bind(a);
@@ -632,8 +638,21 @@ void update(ActorFlight& s,RE::Actor* a,float dt){
     const auto match=providers->find(a,s.motion.active());
     if(!match.profile){stop(s,a,"no supported visible wings");return;}
     const auto c=a->GetCharController();
+    if(s.bound&&registeredWing(s.profile)&&registeredWing(match.profile)&&s.profile!=match.profile
+        &&s.profile->registrationFile==match.profile->registrationFile&&s.profile->wingTemplate==match.profile->wingTemplate
+        &&s.profile->rootNode==match.profile->rootNode&&s.profile->leftRoots==match.profile->leftRoots&&s.profile->rightRoots==match.profile->rightRoots){
+        s.profile=match.profile;
+        s.powerSound=match.profile->flapSoundID?RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->flapSoundID,match.profile->soundPlugin):nullptr;
+        s.cruiseSound=match.profile->fastSoundID?RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->fastSoundID,match.profile->soundPlugin):nullptr;
+        s.spreadSound=match.profile->spreadSoundID?RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(match.profile->spreadSoundID,match.profile->soundPlugin):nullptr;
+    }
+    if(s.bound&&c&&c!=s.controller.get()&&s.body.get()==a->Get3D(false)&&s.effect==match.effect&&s.profile==match.profile){
+        // A rebuilt physics proxy: move the gravity lease to the live controller and continue.
+        SKSE::log::info("NPC flight controller replaced: actor={:08X}; continuing on the live controller",a->GetFormID());
+        if(s.controller)s.gravity.release(s.controller->gravity);s.controller.reset(c);
+    }
     if(s.bound&&(c!=s.controller.get()||s.body.get()!=a->Get3D(false)||s.effect!=match.effect||s.profile!=match.profile)){
-        stop(s,a,"controller/model/provider changed");return;
+        stop(s,a,"model/provider changed");return;
     }
     if(suspended.load()){
         if(s.motion.active()&&s.controller){clearFall(s.controller.get());s.controller->SetLinearVelocityImpl(RE::hkVector4(0,0,0,0));}
@@ -760,7 +779,11 @@ void update(ActorFlight& s,RE::Actor* a,float dt){
         SKSE::log::debug("NPC locomotion transition: actor={:08X} mode={} speed={:.2f} moveStart={} moveStop={} sprintStart={} sprintStop={}; native graph/OAR blends",a->GetFormID(),mode,s.graphSpeed.load(),change.moveStart,change.moveStop,change.sprintStart,change.sprintStop);
     s.blend=std::min(1.f,s.blend+dt/std::max(.1f,match.profile->timing.expandSeconds));
     WingPlayback playback;
-    if(match.profile->continuousFlight)s.continuousRate=4.f*(fast?settings->bodyTiming.forwardGlideSpeed:1.f);
+    if(registeredWing(match.profile)){
+        s.registeredWings.advance(dt);s.registeredWings.loopRate(match.profile->continuousFlight?(fast?settings->bodyTiming.forwardGlideSpeed:1.f):settings->bodyTiming.forwardGlideSpeed,settings->bodyTiming.glideSpeed);
+        playback=s.registeredWings.prepare(match);if(match.profile->continuousFlight)s.registeredWings.blend(0,1,0);
+    }
+    else if(match.profile->continuousFlight)s.continuousRate=4.f*(fast?settings->bodyTiming.forwardGlideSpeed:1.f);
     else if(match.profile->animationless){
         s.logical.advance(dt);
         s.logical.loopRate(settings->bodyTiming.forwardGlideSpeed,settings->bodyTiming.glideSpeed);
@@ -777,12 +800,12 @@ void update(ActorFlight& s,RE::Actor* a,float dt){
         playback=s.visual.prepare(match);
     }
     if(!match.profile->continuousFlight){
-        const bool nativeSprintLoop=vampire::largeSprintLoop(match.profile->nativeVampire,!landing,fast);
+        const bool nativeSprintLoop=vampire::largeSprintLoop(largeWingSprint(match.profile),!landing,fast);
         const auto timing=(!landing&&(!fast||nativeSprintLoop))?settings->hoverTiming.apply(match.profile->timing):match.profile->timing;
         s.strokes.setHover((wingDriven||nativeSprintLoop)&&!landing);
         if(playback.flapWeight==0&&playback.graphWeight==0&&playback.phase>0.001f){
-            const bool parked=match.profile->nativeVampire?s.nativeWings.parkPower():match.profile->animationless?s.logical.parkPower():s.visual.parkPower();
-            if(parked){if(match.profile->nativeVampire)playback=s.nativeWings.prepare(a);else if(match.profile->animationless){playback.phase=s.logical.phase;playback.frequency=s.logical.rate;}else playback=s.visual.prepare(match);}
+            const bool parked=registeredWing(match.profile)?s.registeredWings.parkPower():match.profile->nativeVampire?s.nativeWings.parkPower():match.profile->animationless?s.logical.parkPower():s.visual.parkPower();
+            if(parked){if(registeredWing(match.profile))playback=s.registeredWings.prepare(match);else if(match.profile->nativeVampire)playback=s.nativeWings.prepare(a);else if(match.profile->animationless){playback.phase=s.logical.phase;playback.frequency=s.logical.rate;}else playback=s.visual.prepare(match);}
         }
         if(fast&&!wasFast&&settings->tuning.flapOnHighSpeedEntry){
             s.strokes.highSpeedEntryPulse(playback.phase,playback.flapWeight,timing);
@@ -818,11 +841,12 @@ void update(ActorFlight& s,RE::Actor* a,float dt){
                 std::max(.01f,1.f-playback.phase/timing.downstrokeEnd+s.strokes.liftFraction()),timing.downstrokeSeconds);
             s.motion.applyLandingBrake(s.landingBrake.impulse(s.strokes.liftFraction()));
         }
-        if(match.profile->nativeVampire)s.nativeWings.rate(s.strokes.rate());else if(match.profile->animationless)s.logical.powerRate(s.strokes.rate());else s.visual.powerRate(s.strokes.rate());
+        if(registeredWing(match.profile))s.registeredWings.powerRate(s.strokes.rate());else if(match.profile->nativeVampire)s.nativeWings.rate(s.strokes.rate());else if(match.profile->animationless)s.logical.powerRate(s.strokes.rate());else s.visual.powerRate(s.strokes.rate());
         const bool wantsFlap=nativeSprintLoop||s.strokes.wantsFlap();
         s.flapBlend.update(dt,wantsFlap,wantsFlap?match.profile->timing.toFlapSeconds*s.strokes.raiseRatio(match.profile->timing):match.profile->timing.toGlideSeconds);
         s.fastBlend.update(dt,fast,.5f);
-        if(match.profile->nativeVampire){s.nativeWings.blend(s.flapBlend.value(),s.blend,s.fastBlend.value());s.nativeWings.pitch(settings->powerStrokeWingPitch*s.fastBlend.value());}
+        if(registeredWing(match.profile)){s.registeredWings.blend(s.flapBlend.value(),s.blend,s.fastBlend.value());s.registeredWings.pitch(settings->powerStrokeWingPitch*s.fastBlend.value());}
+        else if(match.profile->nativeVampire){s.nativeWings.blend(s.flapBlend.value(),s.blend,s.fastBlend.value());s.nativeWings.pitch(settings->powerStrokeWingPitch*s.fastBlend.value());}
         else if(match.profile->animationless)s.logical.blend(s.flapBlend.value(),s.blend,s.fastBlend.value());
         else{s.visual.blend(s.flapBlend.value(),s.blend,s.fastBlend.value());s.visual.pitch(settings->powerStrokeWingPitch*s.fastBlend.value());}
         v=s.motion.velocity();
@@ -979,7 +1003,7 @@ void initializeActorFlight(const Configuration& cfg,Wings& wings){
     ActorUpdate<true>::original=character.write_vfunc(0xAD,ActorUpdate<true>::thunk);
     installSpellAimTarget();
     installed=true;resetActorFlight();
-    SKSE::log::info("NPC flight framework 0.4.0: revision=npc-spell-aim-16; Enabled={} AirCombat={} FollowDistance={:.2f} MaxActors={}; native combat selection; native movement ownership leased through takeoff/landing; missing native magic aim targets bridged from projectile solver; per-actor native Vampire Lord wingbeats and body graph; auxiliary/equipment gaps retain flight and same-target ranged spacing; forward-only combat sprint; ranged retreat at half speed or ordinary speed inside minimum range; shared leg overlays; physical touchdown; scan=0.5s combat=0.1s rayBudget=12/frame; WWM={} chainedActor={:X} chainedCharacter={:X}; NPC stamina policy reserved",cfg.actors.enabled,cfg.actors.airCombat,cfg.actors.followDistance,cfg.actors.maxActors,wayfarer!=nullptr,a,c);
+    SKSE::log::info("NPC flight framework 0.4.1: revision=npc-spell-aim-16; Enabled={} AirCombat={} FollowDistance={:.2f} MaxActors={}; native combat selection; native movement ownership leased through takeoff/landing; missing native magic aim targets bridged from projectile solver; per-actor native Vampire Lord wingbeats and body graph; auxiliary/equipment gaps retain flight and same-target ranged spacing; forward-only combat sprint; ranged retreat at half speed or ordinary speed inside minimum range; shared leg overlays; physical touchdown; scan=0.5s combat=0.1s rayBudget=12/frame; WWM={} chainedActor={:X} chainedCharacter={:X}; NPC stamina policy reserved",cfg.actors.enabled,cfg.actors.airCombat,cfg.actors.followDistance,cfg.actors.maxActors,wayfarer!=nullptr,a,c);
 }
 void updateActorFlightLeader(RE::PlayerCharacter* p,float dt,bool playerFlying,bool paused,float hoverReference,bool highSpeed){
     if(!installed.load()||!settings)return;

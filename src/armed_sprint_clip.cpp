@@ -1,4 +1,5 @@
 #include "armed_sprint_clip.hpp"
+#include "actor_state.hpp"
 #include "logging.hpp"
 #include "armed_sprint_clip_policy.hpp"
 #include "lower_body_policy.hpp"
@@ -165,7 +166,7 @@ void updateArmedSprintIdle(RE::hkbClipGenerator* clip,const RE::hkbContext& c){
     const auto idle=sprintIdleSlot(path);if(idle.empty())return;
     if(!alias&&!selected(c))return;
     const auto player=RE::PlayerCharacter::GetSingleton();
-    if(!player||!player->Is3DLoaded()||player->IsDead()||player->IsInRagdollState()||player->IsInKillMove()
+    if(!player||!player->Is3DLoaded()||player->IsDead()||knockedDown(player)||player->IsInKillMove()
         ||player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth)<=0)return;
     const bool desired=wanted(clip,c)&&(alias||indexOf(stringData(c),idle)!=0xffff);
     const auto playing=desired&&alias?bindingPath(clip,c):std::string{};

@@ -94,6 +94,7 @@ inline void applyLiveSettings(Configuration& current, Configuration candidate, f
     roundLiveSettings(candidate);
     for (const auto& setting : liveFloatSettings) setting.value(current)=setting.value(candidate);
     current.disableSprintWhenArmed=candidate.disableSprintWhenArmed;
+    current.tuning.endFlightOnGround=candidate.tuning.endFlightOnGround;
     current.actors.enabled=candidate.actors.enabled;
     current.actors.airCombat=candidate.actors.airCombat;
     current.logSamples=candidate.logSamples;

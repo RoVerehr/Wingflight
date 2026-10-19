@@ -1,4 +1,5 @@
 #pragma once
+#include "wing_channel_policy.hpp"
 #include "flight.hpp"
 #include "wing_motion.hpp"
 #include "body_motion.hpp"
@@ -12,6 +13,11 @@
 namespace wingflight {
 struct WingProfile {
     std::string id, plugin;
+    channel::Template wingTemplate{channel::Template::legacy};
+    channel::PoseSettings wingPose;
+    std::string registrationFile,rootNode,soundPlugin;
+    std::vector<std::string> leftRoots,rightRoots;
+    std::vector<std::uint32_t> armorIDs;
     bool awuCompatibility{};
     bool nativeVampire{}; // Built-in race provider; no magic-effect art owner.
     bool continuousFlight{}; // Keep provider animation; held Jump controls ascent.
@@ -47,7 +53,7 @@ struct Configuration {
     bool enabled{true}, logSamples{false}, poseWhenArmed{true},faceFlight{true};
     bool awuCompatibility{true};
     bool glideEnabled{true};
-    bool lowerBodyEnabled{true},lowerBodyLogClips{true};
+    bool lowerBodyEnabled{true};
     bool muteFlightFootsteps{true};
     bool muteFlightSprintBreath{true};
     bool armedFlightIdle{true};
