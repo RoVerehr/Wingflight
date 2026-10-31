@@ -474,7 +474,7 @@ void combatIntent(ActorFlight& s,RE::Actor* a,float dt,Vec3 at){
     if(!fighting){s.combatSpacing={};s.combatReady=s.combatFleeing=false;s.combatTarget={};s.combatStyle=aerial::CombatStyle::unknown;s.combatItem=0;s.combatSampleAge=.1f;s.combatEvidenceReason="not sampled";}
 }
 void artEvent(WingMatch match,const char* event){
-    if(!match.profile||!match.profile->awuCompatibility||!match.effect||!match.effect->hitEffects)return;
+    if(!match.profile||match.profile->animationless||!match.profile->awuCompatibility||!match.effect||!match.effect->hitEffects)return;
     for(const auto effect:*match.effect->hitEffects)if(effect&&!effect->finished&&effect->GetType()==RE::TEMP_EFFECT_TYPE::kRefModel){
         auto model=static_cast<RE::ModelReferenceEffect*>(effect);
         if(model->GetAttached()&&model->Get3D()&&!model->NotifyAnimationGraph(event))
@@ -576,8 +576,8 @@ bool bind(ActorFlight& s,RE::Actor* a,WingMatch match){
     if(s.recoveryAge>0){s.visual.release(false);s.registeredWings.release(false);s.nativeWings.release(false);s.recoveryAge=0;s.groundRecovery.reset();}
     s.visual.install(settings->spreadAmplitudeMultiplier);
     if(registeredWing(match.profile)){if(!s.registeredWings.prepare(match).found)return false;}
-    else if(match.profile->continuousFlight){bindContinuous(s,match);const auto graphs=s.wingGraphs.load();if(!graphs||graphs->empty())return false;}
     else if(match.profile->animationless)s.logical.reset(match.profile->timing.glideEntryPhase);
+    else if(match.profile->continuousFlight){bindContinuous(s,match);const auto graphs=s.wingGraphs.load();if(!graphs||graphs->empty())return false;}
     else if(match.profile->nativeVampire){if(!s.nativeWings.prepare(a).found)return false;}
     else if(!match.profile->nativeVampire){const auto visual=s.visual.prepare(match);if(!visual.found)return false;}
     s.controller.reset(a->GetCharController());s.body.reset(a->Get3D(false));s.profile=match.profile;s.effect=match.effect;s.bound=true;
@@ -783,7 +783,6 @@ void update(ActorFlight& s,RE::Actor* a,float dt){
         s.registeredWings.advance(dt);s.registeredWings.loopRate(match.profile->continuousFlight?(fast?settings->bodyTiming.forwardGlideSpeed:1.f):settings->bodyTiming.forwardGlideSpeed,settings->bodyTiming.glideSpeed);
         playback=s.registeredWings.prepare(match);if(match.profile->continuousFlight)s.registeredWings.blend(0,1,0);
     }
-    else if(match.profile->continuousFlight)s.continuousRate=4.f*(fast?settings->bodyTiming.forwardGlideSpeed:1.f);
     else if(match.profile->animationless){
         s.logical.advance(dt);
         s.logical.loopRate(settings->bodyTiming.forwardGlideSpeed,settings->bodyTiming.glideSpeed);
@@ -792,6 +791,7 @@ void update(ActorFlight& s,RE::Actor* a,float dt){
         playback.glidePhase=s.logical.fastPhase;playback.glideFrequency=s.logical.fastRate;playback.glideWeight=s.logical.weights.fast;
         playback.spreadPhase=s.logical.spreadPhase;playback.spreadFrequency=s.logical.spreadRate;playback.spreadWeight=s.logical.weights.spread;
     }
+    else if(match.profile->continuousFlight)s.continuousRate=4.f*(fast?settings->bodyTiming.forwardGlideSpeed:1.f);
     else if(match.profile->nativeVampire){
         s.nativeWings.advance(dt);s.nativeWings.loopRate(settings->bodyTiming.forwardGlideSpeed,settings->bodyTiming.glideSpeed);playback=s.nativeWings.prepare(a);
     }else{

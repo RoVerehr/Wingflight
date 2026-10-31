@@ -83,4 +83,48 @@ inline legs::Quaternion poseOutput(legs::Quaternion native,legs::Quaternion targ
     if(editBlend<1)target=legs::blend(editFrom,target,smooth(editBlend));
     return legs::blend(native,target,smooth(ownership));
 }
+// Authored shaping. Rotations are local, so a parent-frame turn premultiplies.
+inline std::array<float,3> rotated(legs::Quaternion q,const std::array<float,3>& v){
+    const auto m=legs::matrix(q);std::array<float,3> out{};
+    for(unsigned i=0;i<3;++i)for(unsigned j=0;j<3;++j)out[i]+=m[i][j]*v[j];
+    return out;
+}
+// Sign-aligned mean of unit quaternions; adequate for one bone's loop.
+inline legs::Quaternion meanRotation(const legs::Quaternion* samples,std::size_t count){
+    if(!count)return {};
+    legs::Quaternion sum{0,0,0,0};const auto first=samples[0];
+    for(std::size_t i=0;i<count;++i){const float s=legs::dot(samples[i],first)<0?-1.f:1.f;
+        sum.x+=s*samples[i].x;sum.y+=s*samples[i].y;sum.z+=s*samples[i].z;sum.w+=s*samples[i].w;}
+    return legs::dot(sum,sum)>1e-8f?legs::normalized(sum):first;
+}
+// Scale the rotation from `center` to `pose` (parent frame) by `factor`.
+inline legs::Quaternion scaleAbout(legs::Quaternion center,legs::Quaternion pose,float factor){
+    if(factor==1||!std::isfinite(factor))return pose;
+    auto d=legs::multiply(pose,{-center.x,-center.y,-center.z,center.w});
+    if(d.w<0)d={-d.x,-d.y,-d.z,-d.w};
+    const float s=std::sqrt(d.x*d.x+d.y*d.y+d.z*d.z);
+    if(s<1e-6f)return pose;
+    const float half=std::atan2(s,d.w)*factor,k=std::sin(half)/s;
+    return legs::multiply({d.x*k,d.y*k,d.z*k,std::cos(half)},center);
+}
+inline float elevationDegrees(const std::array<float,3>& direction,const std::array<float,3>& up){
+    const float a=std::sqrt(direction[0]*direction[0]+direction[1]*direction[1]+direction[2]*direction[2]);
+    const float b=std::sqrt(up[0]*up[0]+up[1]*up[1]+up[2]*up[2]);
+    if(!(a>1e-6f&&b>1e-6f))return 0;
+    return std::asin(std::clamp((direction[0]*up[0]+direction[1]*up[1]+direction[2]*up[2])/(a*b),-1.f,1.f))*57.2957795131f;
+}
+// 0 at the highest elevation of the power stroke, 1 at its lowest, eased so
+// the shaping concentrates at the bottom instead of reshaping the upstroke.
+inline float loweredWeight(float elevation,float highest,float lowest){
+    if(!(highest-lowest>.5f)||!std::isfinite(elevation))return 0;
+    const float f=std::clamp((highest-elevation)/(highest-lowest),0.f,1.f);
+    return f*f;
+}
+// Turn `pose` so that `direction` (already rotated by pose) moves toward `toward`.
+inline legs::Quaternion turnToward(legs::Quaternion pose,const std::array<float,3>& direction,const std::array<float,3>& toward,float degrees){
+    const std::array<float,3> axis{direction[1]*toward[2]-direction[2]*toward[1],direction[2]*toward[0]-direction[0]*toward[2],direction[0]*toward[1]-direction[1]*toward[0]};
+    const float length=std::sqrt(axis[0]*axis[0]+axis[1]*axis[1]+axis[2]*axis[2]);
+    if(degrees==0||!std::isfinite(degrees)||!(length>1e-4f))return pose;
+    return legs::bankAroundAxis(pose,degrees,axis[0],axis[1],axis[2]);
+}
 }

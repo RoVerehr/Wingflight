@@ -59,9 +59,14 @@ void renderWingRegistrationMenu(){
     if(selectedValid){
         ImGuiMCP::Separator();ImGuiMCP::TextWrapped("Selected: %s",selected.name.c_str());
         auto& p=selected.profile;
-        if(p.wingTemplate==channel::Template::invisible)ImGuiMCP::TextWrapped("Invisible: INI-only registration. Ordinary wingbeat flight and sound, with no animation or automatic model binding.");
+        auto& q=p.wingPose;
+        ImGuiMCP::BeginDisabled(!selected.compatible);
+        if(p.wingTemplate==channel::Template::invisible){
+            ImGuiMCP::TextWrapped("Invisible: create the rule in an INI first. No wing model or bone animation is required.");
+            ImGuiMCP::Checkbox("Continuous flight",&p.continuousFlight);
+            ImGuiMCP::TextWrapped("Continuous holds altitude without wingbeats or wingbeat sounds. Hold Jump to climb and Descend to lower. Off uses ordinary wingbeat lift and sounds.");
+        }
         else{
-            ImGuiMCP::BeginDisabled(!selected.compatible);
             ImGuiMCP::TextUnformatted("Animation template");
             for(auto kind:{channel::Template::authored,channel::Template::awu,channel::Template::fairy,channel::Template::vampireLord}){
                 if(ImGuiMCP::Button(channel::templateName(kind))){p.wingTemplate=kind;p.wingPose=channel::defaults(kind);p.continuousFlight=kind==channel::Template::fairy;}
@@ -69,13 +74,19 @@ void renderWingRegistrationMenu(){
             }
             ImGuiMCP::NewLine();ImGuiMCP::Text("Current: %s",channel::templateName(p.wingTemplate));
             ImGuiMCP::TextWrapped("Angles are relative to the model pose captured at binding. Apply and Save Registration updates settings in game.");
-            auto& q=p.wingPose;
             slider("Whole wing forward/back tilt (degrees)",q.forwardTiltDegrees,-180,180);
             ImGuiMCP::TextWrapped("Positive tilts the whole wings forward; negative tilts them backward. Both sides tilt together at their roots, independently of wingbeat amplitude.");
             if(p.wingTemplate==channel::Template::authored){
                 ImGuiMCP::Text("Power: %s | Fast: %s | Spread: %s",p.flapSequence.c_str(),p.glideSequence.empty()?"(power)":p.glideSequence.c_str(),p.spreadSequence.empty()?"(fast)":p.spreadSequence.c_str());
                 ImGuiMCP::TextWrapped(selected.authored||!scannerSelection?"Authored plays the model's own wingbeat sequences: the large hovering wingbeat, the small fast-flight wingbeat and the gliding flutter. Change the sequence names in the INI ([Model] PowerSequence, FastSequence, SpreadSequence). If the model has none, the procedural AWU-style wingbeat is used.":
                     "No matching sequences were found in this model; Authored would use the procedural AWU-style wingbeat.");
+                ImGuiMCP::Separator();ImGuiMCP::TextUnformatted("Sequence shaping");
+                slider("Wingbeat amplitude",q.authoredAmplitude,0,2);
+                slider("Extra depth when lowered (degrees)",q.authoredDepthDegrees,-60,60);
+                slider("Curl inward when lowered (degrees)",q.authoredCurlDegrees,-90,90);
+                ImGuiMCP::TextWrapped("Amplitude scales the whole sequence around its average pose; 1 plays it unchanged. "
+                    "Depth turns each wing further down at the bottom of the power stroke, and Curl bends the wing toward the body there, shared along its length. "
+                    "Both fade out toward the top of the stroke and leave the raised pose unchanged; negative values do the opposite. Neutral: 1, 0, 0.");
                 const auto pairCount=std::min<std::size_t>(std::max<std::size_t>({p.leftRoots.size(),static_cast<std::size_t>(selected.pairs),1}),channel::PoseSettings::maxPairs);
                 if(pairCount>1){
                     ImGuiMCP::Separator();ImGuiMCP::TextUnformatted("Wing pairs");
@@ -129,17 +140,17 @@ void renderWingRegistrationMenu(){
             if(axisChanged)channel::setAxisAngles(q,direction[0],direction[1]);
             ImGuiMCP::TextWrapped("Heading 0 / tilt 0 gives up/down flapping; heading 90 gives the sideways axis; tilt 90 gives the vertical axis. Directions follow the wing attachment and torso. Raised/Lowered angles control the motion range. Pose blend smooths takeover, release and settings changes, without reducing wingbeat amplitude.");
             }
-            if(p.continuousFlight)slider("Continuous ascent speed",p.continuousRiseSpeed,.1f,20);
-            if(ImGuiMCP::Button("Apply and Save Registration")){
-                if(!channel::valid(q))message="Animation settings are invalid. The rotation axis must not be zero.";
-                else{busy=true;const auto candidate=p;const bool fromScanner=scannerSelection;
-                    SKSE::GetTaskInterface()->AddTask([candidate,fromScanner]{const auto error=saveWingRegistration(candidate,fromScanner);auto rules=wingRegistrationProfiles();
-                        std::lock_guard lock(channelMenuMutex);saved=std::move(rules);busy=false;message=error.empty()?"Saved. The same rule now applies to the player and NPCs; unequipping keeps the INI.":error;
-                        if(error.empty()){scannerSelection=false;for(const auto& rule:saved)if(rule.plugin==candidate.plugin&&rule.effectIDs==candidate.effectIDs&&rule.armorIDs==candidate.armorIDs){selected.profile=rule;break;}}
-                    });}
-            }
-            ImGuiMCP::EndDisabled();
         }
+        if(p.continuousFlight)slider("Continuous ascent speed",p.continuousRiseSpeed,.1f,20);
+        if(ImGuiMCP::Button("Apply and Save Registration")){
+            if(!channel::valid(q))message="Animation settings are invalid. The rotation axis must not be zero.";
+            else{busy=true;const auto candidate=p;const bool fromScanner=scannerSelection;
+                SKSE::GetTaskInterface()->AddTask([candidate,fromScanner]{const auto error=saveWingRegistration(candidate,fromScanner);auto rules=wingRegistrationProfiles();
+                    std::lock_guard lock(channelMenuMutex);saved=std::move(rules);busy=false;message=error.empty()?"Saved. The same rule now applies to the player and NPCs; unequipping keeps the INI.":error;
+                    if(error.empty()){scannerSelection=false;for(const auto& rule:saved)if(rule.plugin==candidate.plugin&&rule.effectIDs==candidate.effectIDs&&rule.armorIDs==candidate.armorIDs){selected.profile=rule;break;}}
+                });}
+        }
+        ImGuiMCP::EndDisabled();
     }
     ImGuiMCP::EndDisabled();
 }

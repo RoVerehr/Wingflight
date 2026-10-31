@@ -38,6 +38,7 @@ public:
     void updatePowerSound(WingMatch match, const WingPlayback& playback);
     void clearVisual(bool smooth=false);
     void updateGroundRecovery(WingMatch match,float dt,bool grounded,bool fullFlight);
+    void resetGroundRecovery(){groundRecovery_.clear();}
 private:
     bool nativeActive_{},artReady_{},registeredActive_{};
     bool logicalActive_{};

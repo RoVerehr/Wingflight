@@ -1,4 +1,4 @@
-# Wingflight 0.4.1
+# Wingflight 0.4.2
 
 Wingflight adds flight with collisions, manual wingbeats and automatic hovering to Skyrim.
 
@@ -7,6 +7,10 @@ Winged NPCs and followers can follow the player in flight and fight using their 
 Custom wings can be registered from the control panel or an INI, with shared settings for the player and NPCs.
 
 Default flight poses use the separately installed Flying Animations - Resource (FAR). Custom poses can be selected through Open Animation Replacer (OAR).
+
+Manual flight uses slow automatic wingbeats to descend. Free Flight uses the same descent control while holding Descend. Optional ground-contact behavior supports low hovering or wingbeats without automatic lift.
+
+See [CHANGELOG.txt](CHANGELOG.txt) for release changes and [CUSTOM_WINGS.txt](CUSTOM_WINGS.txt) for custom wing configuration.
 
 Maintained by ROSVER.
 

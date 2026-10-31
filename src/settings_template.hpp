@@ -1,7 +1,7 @@
 #pragma once
 #include <string_view>
 namespace wingflight {
-inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.4.0-6. Startup updates this layout and comments.
+inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.4.2-13. Startup updates this layout and comments.
 ; Recognized settings are retained; replaced INIs are backed up beside this file.
 ; Mod Control Panel: Flight, NPC Flight, FreeFlight, Stamina, Jump, Lower Body tuning and controls apply/save live.
 ; Other settings remain startup-only. External INI edits still require a restart.
@@ -56,9 +56,25 @@ Deadzone=0.2
 [Flight]
 ; Apply/save live. 1: normal ground contact ends full flight (default).
 ; 0: retain flight on the ground; Jump lifts off again, Exit Flight releases it.
-; Automatic lift pauses on the ground. Held-Jump glide still lands normally.
+; GroundWingIdle chooses how retained flight behaves. Held-Jump glide still lands normally.
 ; Damaging collisions and other flight interruptions still end flight.
 EndFlightOnGround=1
+; Only when EndFlightOnGround=0. Apply/save live in the Flight panel.
+; 0: normal flight; both K modes keep continuous low wingbeats after ground contact.
+; Farther than GroundBeatDistance from the floor below, beat speed adjusts to sink at DescentSpeed; Jump restores normal flight.
+; 1: grounded visual wingbeats without automatic lift/cost; Space provides takeoff lift.
+GroundWingIdle=0
+; GroundWingIdle=0 only. Havok units (1 = about 70 Skyrim units), 0.1..3. Space keeps full lift.
+GroundHoverHeight=0.50
+; GroundWingIdle=0 only. Floor distance below (vertical ray) for normal-speed ground beats, Havok units 0.1..3.
+GroundBeatDistance=0.50
+; Shared target sink speed: manual flight, Free Flight held Descend, and Normal ground descent.
+; Havok units/s 0.5..8. Physical wingbeats adjust speed; manual Space keeps full strength.
+; Beats swing the speed slightly around the target; near 8 a swing can pass Collision/MinImpactSpeed and cause damage.
+DescentSpeed=3.00
+; GroundWingIdle=1 only. Visual wingbeat speed, 10..200 percent; 75 is 25% slower, 200 is double speed.
+; Manual Jump wingbeats keep normal speed. Apply/save live in the Flight panel.
+GroundWingIdleSpeedPercent=75.00
 ; Controller velocity units (Havok); tune in game after basic collision tests.
 Speed=7.00
 ; Native actor sprint state selects this horizontal multiplier in all flight modes.
@@ -77,7 +93,7 @@ FlapImpulse=5.50
 MaxRise=10.00
 ; Shared simulated downward acceleration (Havok units/s^2) in both flight modes.
 Gravity=5.00
-; Slow-fall cap for manual glide, free-flight held Descend, and outside-flight held Jump.
+; Glide speed limit without automatic wingbeat stamina, outside-flight held Jump, and Continuous flight descent.
 GlideFallSpeed=3.00
 FlapCooldown=0.50
 ; Actual sprint state + movement: each accepted flap adds this excess over 1x.
@@ -131,7 +147,8 @@ DownstrokeSeconds=0.34
 ; Recovery stays in motion. Does not change gravity, impulse or the downstroke duration.
 RecoveryRate=0.90
 ; Manual Space uses FastUpstrokeSeconds/FastDownstrokeSeconds from the wing adapter INI.
-; Hold Descend for flutter-glide at Flight/GlideFallSpeed; Space can still climb.
+; Hold Descend for physical wingbeats targeting Flight/DescentSpeed; Space can still climb.
+; Manual mode uses the same descending beats without Ctrl; automatic beats use AutoFlapCost.
 ; Release resumes automatic hover at the new altitude. High-speed flight ignores Descend.
 
 [Body]
@@ -206,7 +223,7 @@ HighSpeedFlapHoldSeconds=0.50
 ; Fitted root stays fixed; subsequent two wing joints share correction 25/75%.
 ; Relative correction, not absolute world pitch. 0 disables; body/cruise unchanged.
 HighSpeedPowerStrokeWingPitch=30
-; Expanded flutter / slow descent: manual-mode glide and outside-flight held-Jump glide.
+; Expanded flutter: stamina fallback glide and outside-flight held-Jump glide.
 ; Independent controls: playback speed changes frequency; amplitude changes motion around the expanded pose.
 ; Playback speed multiplier: 1 = original, 0.5 = half speed, 2 = double speed. Range: 0.25..4.
 SpreadPlaybackMultiplier=1.00
@@ -220,7 +237,14 @@ SpreadAmplitudeMultiplier=0.5
 ; Sprint wing rate is 4x multiplied by this value. Ground animation is unchanged.
 FastFlapPlaybackMultiplier=1.20
 
-[Jump]
+)WF_INI"
+R"WF_INI([Jump]
+; Control partial jump opening; AWU dragon/feather airborne flutter requires held Jump.
+; Includes native falling after flight exit or stepping off a ledge, without controlling other wing actions.
+; 0 restores native jump/fall wing behavior; full flight and Glide/Enabled are unchanged.
+; While swimming, block wing jump-opening events only; normal ascent and swimming animations remain native.
+; Sneaking, weapon draw and casting remain native. Live in the Jump panel.
+ControlWingAnimations=1
 ; AWU dragon/feather wing opening during ordinary jumps (0..100 percent).
 ; 0 = folded, 30 = subtle opening, 100 = fully spread. Live in Mod Control Panel / Jump.
 ; Final opening after the initial OverOpenPercent pose; small continuous motion remains.

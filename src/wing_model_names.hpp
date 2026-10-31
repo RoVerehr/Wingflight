@@ -15,12 +15,6 @@ inline std::string_view stableWingNodeName(std::string_view name){
     }
     return name;
 }
-// A node or sequence name the registration INI can store: one line, no list
-// separator, no quotes the INI reader would strip. Skyrim's own skeleton names
-// contain brackets, e.g. "NPC Pelvis [Pelv]", so brackets are allowed.
-inline bool storableWingName(std::string_view name){
-    return name.size()<=255&&name.find_first_of("\r\n,\"")==name.npos;
-}
 // Caller supplies only nodes linked to this model's skin, never an actor-wide
 // first match. Ambiguous names do not bind an unrelated accessory's bones.
 template<class Range,class Name>

@@ -20,9 +20,9 @@ struct WingProfile {
     std::vector<std::uint32_t> armorIDs;
     bool awuCompatibility{};
     bool nativeVampire{}; // Built-in race provider; no magic-effect art owner.
-    bool continuousFlight{}; // Keep provider animation; held Jump controls ascent.
+    bool continuousFlight{}; // Steady hover; held Jump controls ascent, independently of wing animation.
     float continuousRiseSpeed{4.0f};
-    bool animationless{}; // Ordinary wingbeat physics/audio, no attached model.
+    bool animationless{}; // No attached wing model; supports wingbeat or continuous flight.
     std::vector<std::uint32_t> effectIDs;
     std::string takeoff{"WingflightFlap"}, flap{"WingflightFlap"}, glide{"WingflightFlap"};
     std::string hover{"WingflightFlap"}, land{"WingflightRelease"};
@@ -46,6 +46,7 @@ struct Configuration {
     BodyTiming bodyTiming;
     float powerStrokeWingPitch{45};
     float highSpeedFlapHoldSeconds{0.5f};
+    bool controlJumpWingAnimations{true};
     float jumpWingOpenPercent{30};
     float jumpWingOverOpenPercent{35},jumpWingOpenSeconds{.22f},jumpWingSettleSeconds{.43f};
     float jumpWingFlutterPeriod{1.6f},jumpWingFlutterAmplitude{1};

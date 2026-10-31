@@ -55,7 +55,9 @@ these for you; you can also write or edit them by hand. A minimal file:
   Effects    Magic effect FormIDs that trigger flight while active. Use
              Armors, Effects, or both.
   Template   Authored, AWU, Fairy, VampireLord or Invisible (section 3).
-  RiseSpeed  Fairy only: climb speed while holding Jump, 0.1 to 100
+  FlightStyle Wingbeats or Continuous. Defaults to Continuous for Fairy and
+              Wingbeats for other templates. Independent of visible wings.
+  RiseSpeed  Continuous flight: climb speed while holding Jump, 0.1 to 100
              (default 4).
 
 FormIDs are hexadecimal and local to the plugin, without the load-order prefix
@@ -64,6 +66,10 @@ not enough; it has to be worn or the effect active.
 
 Write comments on their own lines. A comment after a value ("Up=50 ; note")
 is read as part of the value and breaks that setting.
+
+Plugin, bone and animation names may contain brackets and other punctuation.
+The panel preserves ordinary names and automatically escapes INI separators
+when needed; do not change an automatically saved @hex: value by hand.
 
 When you save over an existing rule, the previous version is kept as .bak
 (only the most recent one).
@@ -80,8 +86,29 @@ When you save over an existing rule, the previous version is kept as .bak
                the character's race or body animations.
   Fairy        Continuous fast flapping, also while descending. Hold Jump to
                climb; sprinting speeds up the flapping. No Jump wingbeat boost.
-  Invisible    Wingbeat flight and sounds with no visible wings and no bone
-               animation. INI only; the scanner never creates it.
+  Invisible    No visible wings or bone animation. Defaults to wingbeat flight
+               and sounds. Add FlightStyle=Continuous for steady levitation
+               without wingbeats or wingbeat sounds. INI only; the scanner
+               never creates it. Saved rules can be tuned in the panel.
+
+For a model-less levitation effect (also supports Armors instead of Effects):
+
+  [Wings]
+  Plugin=YourMod.esp
+  Effects=000800
+  Template=Invisible
+  FlightStyle=Continuous
+  RiseSpeed=4
+
+No [Model] section is needed. Hold Jump to rise and Descend to lower; release
+to hover. This uses the existing Fairy flight physics, including the shared
+continuous-flight stamina and landing rules, for the player and NPCs.
+In Custom Wings, select the saved rule to change Continuous flight or ascent
+speed, then Apply and Save Registration. Creating the rule still requires an INI.
+
+Older provider INIs without Template can also combine AnimationDriver=None
+with FlightStyle=Continuous. Keep their Plugin and Effects fields; no conversion
+or rewritten configuration is required.
 
 The procedural templates are motion presets, not copies of AWU or Vampire Lord
 animation. They work on any skeleton, but always check the result in game and
@@ -339,6 +366,14 @@ for more detail. Warnings and errors are always logged.
 
 The wings are rebound automatically when equipment changes; no rescan is
 needed.
+
+Flight Framework and Flying Mod can remain installed. While their own flight
+mode is active, Wingflight passes Jump to the original handler and does not
+start its takeoff or held-Jump glide. After leaving that mode, release Jump
+before pressing it again to use Wingflight. This reads FlightFramework_IsFlying
+and Flying Mod's FlyingToggle, not equipment alone. End the current flight
+before switching between flight systems; this does not implement a transfer
+between two already-active controllers.
 
 Older files:
   - Registrations saved before articulation existed keep their previous plain

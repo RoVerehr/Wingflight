@@ -1,3 +1,42 @@
+Wingflight 0.4.2
+Changes since the public 0.4.1 release.
+
+Flight controls and descent
+- Manual flight now descends with automatic wingbeats without holding Ctrl. In Free Flight, hold Descend to use the same controlled descent; release it to resume hovering at the current altitude.
+- Add shared Flight/DescentSpeed (0.5-8 Havok units/s, default 3). Wingbeat speed adjusts toward this target while Gravity and visible downstroke lift remain active. It is an average target, not a hard speed limit; fast settings can still cause collision damage.
+- Space retains its full manual power stroke. Automatic descent beats use AutoFlapCost and fall back to glide when stamina is insufficient. Sprint, Continuous flight and outside-flight held-Jump glide keep their existing controls.
+- Finish the visual downswing of manual power strokes before returning to slow-descent playback. Fixes premature slowing in manual mode and when pressing Descend immediately after Space in Free Flight, without adding lift or stamina cost.
+
+Ground contact
+- Expand retained ground flight with selectable Ground Contact Behavior when End Flight on Ground is disabled.
+- Normal flight: maintain low wingbeats in either K mode. GroundHoverHeight sets the target clearance and GroundBeatDistance sets the range for normal-speed beats (both default 0.50 Havok units). Beyond that range, use the shared DescentSpeed feedback instead of holding the previous floor's altitude over lower terrain or ledges.
+- Ground wing idle: play wingbeats without automatic lift or automatic beat cost; press Jump to take off. Ground wing idle speed is adjustable from 10% to 200% (default 75%). Brief contact gaps no longer restart automatic lift.
+- Show height/distance controls for Normal flight or idle speed for Ground wing idle. Ground-specific controls are disabled when End Flight on Ground is enabled; the shared DescentSpeed remains available. Apply and Save updates these settings live.
+- Fix the pause and sudden upward snap when flapping away from the floor by suppressing native Foot IK ground feedback during full flight and restoring it on exit.
+
+Wing animations and flight fixes
+- Restore AWU swimming, sneaking, weapon-draw and spell-casting wing animations outside flight. Keep non-jump actions native and restore native wing sounds during ordinary-jump preview.
+- Add Control Jump Wing Animations in the Jump panel (Jump/ControlWingAnimations, enabled by default). When enabled, native airborne flutter requires held Jump, including after flight exit, releasing glide or stepping off a ledge. Turning it off restores native jump/fall wing handling while full flight and the separate held-glide option remain available.
+- Apply jump-wing event control as soon as a ground jump is accepted, so AWU full opening cannot override WingOpenPercent and OverOpenPercent before takeoff.
+- Fix AWU wings staying spread after landing with Jump held, including when no movement key is pressed.
+- Fix wings freezing in a flight pose after entering water. Complete the pending flight-pose fade while swimming so AWU can display its native swimming animation without waiting to leave the water.
+- Fix AWU dragon/feather wings becoming stuck in jump flutter when pressing Jump to swim upward. With Control Jump Wing Animations enabled, block jump-opening events on the player's wings while swimming; preserve normal ascent and AWU swimming animations.
+- Restore wing folding after full flight ends through manual exit (C) or a damaging collision. Each exit gets fresh recovery attempts; a new flight, glide or save load clears the previous recovery state.
+- Fix the sneak-eye HUD indicator remaining visible after taking off from sneak.
+- Fix false automatic landings after a character-controller replacement by checking ground support after the new controller updates.
+
+Custom wings
+- Accept valid plugin, bone and animation names containing brackets or other punctuation, and preserve them when saving registrations.
+- Fix saved registrations failing to bind wings attached directly to body anchors such as Spine2.
+- Add Authored animation controls for wingbeat amplitude, extra depth and inward curl. Existing configurations retain neutral defaults.
+- Allow invisible wings to use continuous levitation without wingbeat bobbing or sounds: Template=Invisible with FlightStyle=Continuous, or legacy AnimationDriver=None with FlightStyle=Continuous. Applies to players and NPCs.
+- Add continuous-flight and ascent-speed controls for saved Invisible registrations. Creating an Invisible registration still requires an INI; files without FlightStyle retain their previous defaults.
+
+Compatibility and configuration
+- Do not disable Wingflight merely because Flight Framework or Flying Mod is installed. While a supported external flight mode is active, leave Jump to that mod and block new Wingflight takeoff, held glide and saved-flight recovery. Release and press Jump again after leaving the other mode. This does not transfer control between two already-active flight modes.
+- Replace the test-build GroundDescentSpeed setting with the shared DescentSpeed, preserving its tuned value. An explicit DescentSpeed takes precedence if both keys exist.
+- Continue refreshing the main INI layout and comments at startup while retaining valid settings, removing retired keys and backing up the previous file. Custom wing registration INIs are not rewritten by this migration.
+
 Wingflight 0.4.1
 - Add custom-wing registration for equipped armor and active magic effects, shared by the player and NPCs. Scan compatible models and save their settings through the Custom Wings panel or an INI.
 - Add AWU-style, Fairy and Vampire Lord motion templates, an Authored template for animations embedded in the wing model, and manual INI-only Invisible registration.

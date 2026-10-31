@@ -31,6 +31,9 @@
 #include "live_settings.hpp"
 #include "runtime_support.hpp"
 #include "gravity_lease.hpp"
+#include "flight_foot_ik.hpp"
+#include "controller_support.hpp"
+#include "external_flight_policy.hpp"
 #include "airborne_exit.hpp"
 #include "gamepad_input.hpp"
 #include "menu_flight_pause.hpp"
@@ -45,6 +48,7 @@ namespace {
 using namespace wingflight;
 Configuration config;
 Flight flight;
+FlightFootIK flightFootIK;
 FlightCollision flightCollision;
 MenuFlightPause menuFlightPause;
 vampire::BatTravel nativeBatTravel;
@@ -69,6 +73,7 @@ float resumeWait{}, sampleTimer{}, wingRetry{}, ceilingTimer{}, bodyRetry{};
 // Brief wing-visual or graph-variable gaps (rebinds, other animation mods) are
 // tolerated; only a persistent failure ends flight.
 float visualMissing{}, graphMissing{};
+FlightExitWingWindow flightExitWings;
 constexpr float visualFailureGrace=1.5f;
 std::atomic_bool managedAirAnimation{};
 std::atomic_uint blockedBodyEvents{};
@@ -90,6 +95,7 @@ WingEntry wingEntry;
 float blendTrace{}, blendSample{};
 bool blendTarget{true}, blendMissingReported{};
 RE::bhkCharacterController* flightController{}; // identity only; always reacquire before access
+ControllerSupport controllerSupport;
 RE::ActiveEffect* visualEffect{}; // identity only, never dereferenced after the frame
 RE::FormID flightRace{};
 bool flightLordBody{};
@@ -100,10 +106,19 @@ bool lastInterior{};
 RE::NiPoint3 lastPosition{};
 std::string lastEvent, lastProfile;
 bool supported(RE::bhkCharacterController* controller);
+bool physicalSupported(RE::bhkCharacterController* controller);
 bool presentationSupported(RE::bhkCharacterController* controller);
 bool actorGraphSafe(RE::PlayerCharacter* player) {
     return player && player->Is3DLoaded() && !player->IsDead() && !knockedDown(player)
         && player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth) > 0;
+}
+bool externalFrameworkPresent{};
+RE::TESGlobal* externalFlyingToggle{};
+ExternalFlightOwner currentExternalFlight(RE::PlayerCharacter* player){
+    bool frameworkFlying{};
+    if(externalFrameworkPresent&&actorGraphSafe(player))
+        player->GetGraphVariableBool("FlightFramework_IsFlying",frameworkFlying);
+    return externalFlightOwner(frameworkFlying,externalFlyingToggle?externalFlyingToggle->value:0.f);
 }
 // Names every failed hard condition, so a single user log identifies the cause.
 std::string unsafeActorReason(RE::PlayerCharacter* player){
@@ -118,10 +133,13 @@ std::string unsafeActorReason(RE::PlayerCharacter* player){
     return "unsafe actor: "+(failed.empty()?std::string("state changed during update"):failed);
 }
 void adoptFlightController(RE::bhkCharacterController* live){
+    if(!live||live==flightController)return;
     // A rebuilt 3D/physics proxy replaces the controller. Follow the live one:
     // the gravity lease moves with ownedGravity, and flight state is unchanged.
-    SKSE::log::info("Flight controller replaced: previous={:X} current={:X}; continuing flight on the live controller",
-        reinterpret_cast<std::uintptr_t>(flightController),reinterpret_cast<std::uintptr_t>(live));
+    if(flight.flying())controllerSupport.replaced();
+    SKSE::log::info("Flight controller replaced: previous={:X} current={:X}; continuing flight on the live controller; rawSupported={} heldSupported={} supportHandoff={}",
+        reinterpret_cast<std::uintptr_t>(flightController),reinterpret_cast<std::uintptr_t>(live),
+        physicalSupported(live),controllerSupport.supported(physicalSupported(live)),controllerSupport.pending());
     flightController=live;flightCollision.reset();ceilingTimer=0;
 }
 bool nativeBatAnimationDriven(RE::PlayerCharacter* actor){
@@ -173,6 +191,13 @@ bool jumpHeld() {
     return false;
 }
 
+void discardExternalFlightInput(){
+    std::lock_guard lock(inputMutex);
+    bool held{};for(const auto& device:input.held)held|=device.jump;
+    airInput.cancel(held);
+    input.flap=input.takeoff=input.cycle=input.land=input.released=false;
+    jumpBoost.reset();groundJumpRequested=false;
+}
 struct InputEvents : RE::BSTEventSink<RE::InputEvent*> {
     RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* events, RE::BSTEventSource<RE::InputEvent*>*) override {
         if (!ready || !loaded || !events) { return RE::BSEventNotifyControl::kContinue; }
@@ -274,9 +299,29 @@ Vec3 velocity(RE::bhkCharacterController* controller) {
     controller->GetLinearVelocityImpl(vector);
     return {vector.quad.m128_f32[0], vector.quad.m128_f32[1], vector.quad.m128_f32[2]};
 }
-bool supported(RE::bhkCharacterController* controller) {
-    return controller->surfaceInfo.supportedState == RE::hkpSurfaceInfo::SupportedState::kSupported
+bool physicalSupported(RE::bhkCharacterController* controller) {
+    return controller&&controller->surfaceInfo.supportedState == RE::hkpSurfaceInfo::SupportedState::kSupported
         && controller->surfaceInfo.surfaceNormal.quad.m128_f32[2] > 0.45f;
+}
+bool supported(RE::bhkCharacterController* controller) {
+    const bool raw=physicalSupported(controller);
+    return controller&&controller==flightController&&flight.flying()?controllerSupport.supported(raw):raw;
+}
+// One vertical ray, the same LOS pick NPC flight uses, measures the floor
+// under the feet for the Normal ground cycle. Infinity when nothing is hit.
+float groundDistanceBelow(RE::bhkCharacterController* controller,const RE::NiPoint3& feet) {
+    constexpr float range=4.0f; // Havok units, beyond the largest GroundBeatDistance.
+    const auto world=controller?controller->GetHavokWorld():nullptr;
+    if(!world)return INFINITY;
+    const float scale=RE::bhkWorld::GetWorldScale();
+    constexpr float startAbove=0.05f; // Start inside the capsule, not under a floor the feet rest on.
+    const float x=feet.x*scale,y=feet.y*scale,z=feet.z*scale+startAbove;
+    RE::bhkPickData pick{};pick.rayInput.from=RE::hkVector4(x,y,z,0);pick.rayInput.to=RE::hkVector4(x,y,z-range,0);
+    pick.rayInput.filterInfo.SetCollisionLayer(RE::COL_LAYER::kLOS);pick.rayOutput.Reset();
+    {RE::BSReadLockGuard lock(world->worldLock);world->PickObject(pick);}
+    if(!pick.rayOutput.HasHit()||!std::isfinite(pick.rayOutput.hitFraction))return INFINITY;
+    if(pick.rayOutput.normal.quad.m128_f32[2]<=0.45f)return INFINITY; // A wall is not a floor.
+    return rayFloorDistance(range,startAbove,pick.rayOutput.hitFraction);
 }
 bool presentationSupported(RE::bhkCharacterController* controller) {
     if(!controller)return true;
@@ -384,7 +429,11 @@ bool publish(RE::PlayerCharacter* player, bool flying) {
 void pay(RE::Actor* player, float cost) {
     if (cost > 0) { player->AsActorValueOwner()->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kStamina, -cost); }
 }
-void finish(RE::PlayerCharacter* player, WingMatch match, const char* reason, bool freeFall=false) {
+void finish(RE::PlayerCharacter* player, WingMatch match, const char* reason, bool freeFall=false, bool endedFullFlight=false) {
+    // tick may already have reset flight (manual exit, landing or exhaustion).
+    // Each exit owns fresh debounce/retry state, even on the same wing ART.
+    if(flight.flying()||endedFullFlight){wings.resetGroundRecovery();flightExitWings.begin();}
+    flightFootIK.release();
     jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
     flightCollision.reset();
     if (flight.active() || !lastProfile.empty()) {
@@ -399,14 +448,21 @@ void finish(RE::PlayerCharacter* player, WingMatch match, const char* reason, bo
     nativeBatVelocitySamples=0;
     flightFacing.release();bodyMotion.reset();flightBankTurn=0;
     ownedGravity.release();
-    flight.reset(); lastEvent.clear(); lastProfile.clear(); flightRace = 0; flightLordBody=false;visualActorRoot=nullptr;
+    flight.reset();controllerSupport.reset(); lastEvent.clear(); lastProfile.clear(); flightRace = 0; flightLordBody=false;visualActorRoot=nullptr;
     setGlideClipGuard(nullptr,false);
     managedAirAnimation = false; wings.clearVisual(actorGraphSafe(player)); bodyRetry = 0;
     if(actorGraphSafe(player))updateFlightBreath(player,false);
     wingMotion.reset(); wingRetry = ceilingTimer = visualMissing = graphMissing = 0; flightController = nullptr; visualEffect = nullptr;
     if (actorGraphSafe(player)) {
         if (!match.profile) { match = wings.find(player); }
-        updateHeldWings(match,0,jumpHeld(),freeFall,false,false,false,config.glideHoldSeconds);
+        if(const auto controller=player->GetCharController();controller&&physicalSupported(controller)&&!player->AsActorState()->IsSwimming())landHeldWings(0);
+        else {
+            // Register the closed wing-only gate BEFORE JumpFall is relayed by
+            // the actor. Keep native body falling/gravity, but do not let AWU
+            // reopen its flutter loop without a fresh held-Jump intent.
+            updateHeldWings(match,0,false,true,false,false,false,config.glideHoldSeconds,
+                config.controlJumpWingAnimations);
+        }
         if (match.profile) {
             wings.setBlend(match,0,0);
             wings.send(match, freeFall?match.profile->fall:match.profile->land);
@@ -430,12 +486,14 @@ float cameraYaw(RE::PlayerCharacter* player) {
 }
 const char* modeName(Mode mode) {
     switch (mode) {
-    case Mode::flap: return "Wingflight: flap / glide";
+    case Mode::flap: return "Wingflight: manual flight";
     case Mode::free: return "Wingflight: free flight";
-    default: return "Wingflight: flap / glide";
+    default: return "Wingflight: manual flight";
     }
 }
 void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool glideOnly=false) {
+    // Recheck at entry: a provider may activate after input collection.
+    if(currentExternalFlight(player)!=ExternalFlightOwner::none){discardExternalFlightInput();return;}
     flightCollision.reset();
     if(!wings.prepareVisual(match).found){
         SKSE::log::error("Flight blocked: original wing resources could not be bound by the runtime driver");
@@ -456,6 +514,7 @@ void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool gli
     airborneExitEvents.reset();
     bodyMotion.reset();jumpBoost.reset();flightBankTurn=0;
     ownedGravity.release();
+    flightExitWings.reset();wings.resetGroundRecovery();
     if(glideOnly)flight.beginGlide(initialVelocity,config.tuning);else flight.begin(initialVelocity, !restoring, config.tuning);
     // Keep the preview's displayed wing weights in the runtime driver. Its
     // entry blend will continue from them, rather than going back to folded.
@@ -471,6 +530,7 @@ void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool gli
     wingMotion.reset(); if(!glideOnly&&!match.profile->continuousFlight)wingMotion.pulse(!restoring,false,config.tuning.flapCost); wingBlend.reset(glideOnly?0.0f:1.0f);fastBlend.reset(0); wingEntry.reset();
     blendTarget=true; blendTrace=0.8f; blendSample=0; blendMissingReported=false;
     wingRetry = ceilingTimer = visualMissing = graphMissing = 0; flightController = controller; visualEffect = match.effect;
+    controllerSupport.reset(physicalSupported(controller));
     lastEvent.clear(); lastProfile = match.profile->id;
     managedAirAnimation = !glideOnly;
     wings.prepareVisual(match);
@@ -481,6 +541,7 @@ void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool gli
     // Outside-flight hold-glide controls only the wings and descent speed.
     // Full flight, including its own glide, retains the managed body poses.
     publish(player, flight.flying());
+    flightFootIK.update(player,flight.flying());
     // JumpLandEnd can activate locomotion immediately during takeoff. Register
     // the owned character before that activation, including a sprint from ground.
     prepareArmedSprintIdle(player,!glideOnly&&config.armedFlightIdle&&!usesVampireLordBehavior(player));
@@ -495,8 +556,24 @@ void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool gli
     // clear the sneak bit or force SneakStop; request once, with no frame retry.
     if(!glideOnly&&!usesVampireLordBehavior(player)&&player->AsActorState()->IsSneaking()){
         const bool accepted=RE::SourceActionMap::DoAction(player,RE::DEFAULT_OBJECT::kActionSneak);
+        // ActionSneak updates actor/animation state, but entry from an airborne
+        // state can leave the HUD's cached stealth mode visible. Use the native
+        // HUD message once, only after the actor has actually left sneak.
+        bool hudQueued{};
+        if(accepted&&!player->AsActorState()->IsSneaking()){
+            const auto queue=RE::UIMessageQueue::GetSingleton();
+            const auto strings=RE::InterfaceStrings::GetSingleton();
+            if(queue&&strings)if(auto data=static_cast<RE::HUDData*>(queue->CreateUIMessageData(strings->hudData))){
+                data->type=RE::HUD_MESSAGE_TYPE::kCrosshairSneak;
+                data->show=false;
+                data->discovery=RE::MARKER_TYPE::kNone; // Native message uses this slot for detection level.
+                queue->AddMessage(RE::HUDMenu::MENU_NAME,RE::UI_MESSAGE_TYPE::kUpdate,data);
+                hudQueued=true;
+            }
+            if(!hudQueued)SKSE::log::warn("Flight entry unsneak HUD message unavailable; native sneak state retained");
+        }
         bool graphSneaking{};const bool graphRead=player->GetGraphVariableBool("IsSneaking",graphSneaking);
-        SKSE::log::debug("Flight entry native unsneak: actionAccepted={} actorSneaking={} graphReadable={} graphSneaking={}; one request, native state ownership",accepted,player->AsActorState()->IsSneaking(),graphRead,graphSneaking);
+        SKSE::log::debug("Flight entry native unsneak: actionAccepted={} actorSneaking={} graphReadable={} graphSneaking={} hudHideQueued={}; one request, native state ownership",accepted,player->AsActorState()->IsSneaking(),graphRead,graphSneaking,hudQueued);
         if(!accepted)SKSE::log::warn("Flight entry native ActionSneak was rejected; no forced sneak-state writes or repeated requests");
     }
     bodyRetry = 0.25f;
@@ -512,6 +589,22 @@ void update(RE::PlayerCharacter* player, float delta) {
         if (flight.active()) { finish(player, {}, (unsafeActorReason(player)+"; no controller/graph writes").c_str()); }
         else wings.clearVisual();
         clearInput(); return;
+    }
+    const auto external=currentExternalFlight(player);
+    static auto lastExternal=ExternalFlightOwner::none;
+    if(external!=lastExternal){
+        SKSE::log::debug("External flight input owner: {}; Wingflight new takeoff/glide requests yield while active",externalFlightName(external));
+        lastExternal=external;
+    }
+    if(!flight.active()&&external!=ExternalFlightOwner::none){
+        discardExternalFlightInput();resumeMode=-1;resumeWait=0;
+        // Clear only our saved graph flags; do not send wing/body landing events.
+        if(resetGraphs){publish(player,false);resetGraphs=false;}
+        jumpWingPreview.reset();
+        if(jumpPreviewOwned){wings.clearVisual(false);jumpPreviewOwned=false;jumpPreviewEffect=nullptr;}
+        // Finish only our queued visual release, without body events or velocity writes.
+        if(!menuOpen()&&std::isfinite(delta)&&delta>0)wings.advanceVisual(std::min(delta,.1f));
+        return;
     }
     refreshVampireContext(player);
     updateAWUCompatibility(player,config.glideEnabled || flight.active());
@@ -560,6 +653,10 @@ void update(RE::PlayerCharacter* player, float delta) {
         }
         if (wasActive) { finish(player, match, "actor unavailable, transformed, swimming, mounted, knocked down or seated"); }
         else if(jumpPreviewOwned){wings.clearVisual(true);jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;}
+        // Being ineligible for flight must not pause its queued visual release.
+        // The native swim/action graph keeps updating; fade our last pose out
+        // instead of holding it over that graph until the actor leaves water.
+        if(std::isfinite(delta)&&delta>0)wings.advanceVisual(std::min(delta,.1f));
         clearInput(); return;
     }
     static bool controlLockHeld{};
@@ -571,6 +668,9 @@ void update(RE::PlayerCharacter* player, float delta) {
             controlLockHeld=true;flightCollision.reset();
             const auto held=player->GetCharController();clearFall(held);held->SetLinearVelocityImpl(RE::hkVector4(0,0,0,0));
         }else if(jumpPreviewOwned){wings.clearVisual(true);jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;}
+        // A suspended active flight stays paused. An already released preview
+        // still needs clock ticks to finish yielding to the native animation.
+        if(!flight.active()&&std::isfinite(delta)&&delta>0)wings.advanceVisual(std::min(delta,.1f));
         clearInput(); return;
     }
     if(controlLockHeld){controlLockHeld=false;if(wasActive)SKSE::log::debug("Flight resumed: controls and camera available");}
@@ -611,7 +711,9 @@ void update(RE::PlayerCharacter* player, float delta) {
         visualEffect=match.effect;lastProfile=match.profile->id;visualActorRoot=player->Get3D(false);wingRetry=0;
     }
     wings.advanceVisual(dt);
-    if(!heldWingGateInstalled()||!heldWingsEligible(match.profile))wings.updateGroundRecovery(match,dt,supported(controller),flight.active());
+    const bool exitFold=flightExitWings.update(dt,flight.active(),supported(controller));
+    if(!heldWingGateInstalled()||!heldWingsEligible(match.profile)||exitFold)
+        wings.updateGroundRecovery(match,dt,supported(controller),flight.active());
     if (resumeMode >= 0) {
         resumeWait += dt;
         if (match.profile) {
@@ -644,7 +746,7 @@ void update(RE::PlayerCharacter* player, float delta) {
         airborne,flight.flying(),config.glideHoldSeconds);
     controls.glideHeld=action.glide && config.glideEnabled;
     controls.takeoff=action.takeoff;
-    if(groundJumpRequested.exchange(false)){jumpBoost.arm();jumpWingPreview.arm();}
+    if(groundJumpRequested.exchange(false)){jumpBoost.arm();if(config.controlJumpWingAnimations)jumpWingPreview.arm();}
     if(!flight.active()){
         auto native=velocity(controller);
         const float boosted=jumpBoost.sample(dt,match.profile!=nullptr,airborne,native.z,config.jumpHeightMultiplier);
@@ -656,10 +758,11 @@ void update(RE::PlayerCharacter* player, float delta) {
     }
     if(config.glideEnabled&&!flight.active()&&match.profile&&action.glide&&!controls.land)start(player,match,false,true);
     if (!flight.active()) {
-        const bool previewEligible=heldWingGateInstalled()&&heldWingsEligible(match.profile);
+        const bool previewEligible=config.controlJumpWingAnimations&&!player->AsActorState()->IsSwimming()&&heldWingGateInstalled()&&heldWingsEligible(match.profile);
         if(jumpPreviewOwned&&(!previewEligible||jumpPreviewEffect!=match.effect)){
-            wings.clearVisual(true);jumpPreviewOwned=false;jumpPreviewEffect=nullptr;jumpWingPreview.reset();
+            wings.clearVisual(config.controlJumpWingAnimations);jumpPreviewOwned=false;jumpPreviewEffect=nullptr;jumpWingPreview.reset();
         }
+        if(!previewEligible)jumpWingPreview.reset();
         const float preview=jumpWingPreview.update(dt,airborne,previewEligible,config.jumpWingOpenPercent,
             config.jumpWingOverOpenPercent,config.jumpWingOpenSeconds,config.jumpWingSettleSeconds);
         if(preview>0&&previewEligible){
@@ -698,26 +801,27 @@ void update(RE::PlayerCharacter* player, float delta) {
     } else { ceilingTimer = 0; }
     // Predict raising lead from the visible clip. Our shared simulated gravity
     // controls momentum; lift still requires real downstroke progress.
-    const auto hoverPlayback=(flight.mode()==Mode::free || controls.cycle)?wings.prepareVisual(match):WingPlayback{};
+    const auto hoverPlayback=flight.flying()?wings.prepareVisual(match):WingPlayback{};
     const auto hoverTiming=config.hoverTiming.apply(match.profile->timing);
-    const bool nextFree=controls.cycle?flight.mode()!=Mode::free:flight.mode()==Mode::free;
     const bool nextFast=controls.sprint&&std::hypot(controls.right,controls.forward)>0.05f;
-    const bool cancelAutomatic=!nextFree||nextFast||controls.down||flight.retainGroundContact(supported(controller),config.tuning);
+    const bool cancelAutomatic=!flight.flying()||nextFast||flight.groundWingIdle(config.tuning);
     auto flightTuning=config.tuning;
     if(providerLoop)flightTuning.continuousRiseSpeed=match.profile->continuousRiseSpeed;
-    const auto result = flight.tick(dt, controls,
-        {match.profile != nullptr, true, supported(controller), player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina),
-            position.z/RE::bhkWorld::GetWorldScaleInverse(),hoverPlayback.active?hoverPlayback.phase:-1.0f,
-            hoverPlayback.flapWeight,match.profile->timing.downstrokeEnd,
-            wingMotion.automaticLead(hoverTiming,hoverPlayback.phase),hoverTiming.downstrokeSeconds,wingMotion.pending()>0,
-            wingMotion.reservedCost(true,cancelAutomatic),wingMotion.reservedCost(false,cancelAutomatic)}, flightTuning);
+    Observation observation{match.profile != nullptr, true, supported(controller), player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kStamina),
+        position.z/RE::bhkWorld::GetWorldScaleInverse(),hoverPlayback.active?hoverPlayback.phase:-1.0f,
+        hoverPlayback.flapWeight,match.profile->timing.downstrokeEnd,
+        wingMotion.automaticLead(hoverTiming,hoverPlayback.phase),hoverTiming.downstrokeSeconds,wingMotion.pending()>0,
+        wingMotion.reservedCost(true,cancelAutomatic),wingMotion.reservedCost(false,cancelAutomatic)};
+    if(flight.normalGroundHover())observation.groundDistance=groundDistanceBelow(controller,position);
+    const bool fullFlightBeforeTick=flight.flying();
+    const auto result = flight.tick(dt, controls, observation, flightTuning);
     pay(player, result.cost);
     if (result.released) {
         airInput.cancel(controls.up);
-        finish(player,match,"manual exit: native free fall and AWU falling wings",!supported(controller));
+        finish(player,match,"manual exit: native free fall and AWU falling wings",!supported(controller),fullFlightBeforeTick);
         return; // No velocity, fall-time or fall-height writes after releasing.
     }
-    if (result.landed || result.aborted) { airInput.cancel(controls.up);finish(player, match, result.landed ? "ground contact" : "eligibility lost"); return; }
+    if (result.landed || result.aborted) { airInput.cancel(controls.up);finish(player, match, result.landed ? "ground contact" : "eligibility lost",false,fullFlightBeforeTick); return; }
     if (previousMode != flight.mode()) {
         if(controls.cycle && flight.flying()&&!flight.continuousFlight())preferredFlightMode=flight.mode();
         RE::SendHUDMessage::ShowHUDMessage(modeName(flight.mode()));
@@ -725,8 +829,9 @@ void update(RE::PlayerCharacter* player, float delta) {
     const float heading=player->GetAngleZ();
     const float observedForward=observedVelocity.x*std::sin(heading)+observedVelocity.y*std::cos(heading);
     bool continuous = flight.automaticHover();
+    const bool groundWingIdle=flight.groundWingIdle(config.tuning);
     const bool nativeSprintLoop=vampire::largeSprintLoop(largeWingSprint(match.profile),flight.flying(),flight.highSpeed());
-    const auto timing=((flight.mode()==Mode::free&&!flight.highSpeed()&&!flight.glideOnly())||nativeSprintLoop)
+    const auto timing=(flight.automaticHover()||flight.normalGroundHover()||nativeSprintLoop)
         ?config.hoverTiming.apply(match.profile->timing):match.profile->timing;
     const float bodyTurn=std::remainder(controls.yaw-heading,6.2831853f)+controls.right*0.5f;
     auto playback=wings.prepareVisual(match);
@@ -741,8 +846,9 @@ void update(RE::PlayerCharacter* player, float delta) {
     bodyMotion.update(dt,!player->AsActorState()->IsWeaponDrawn(),controls.forward,
         observedForward,config.tuning.speed,config.bodyTiming,flight.highSpeed());
     if(!providerLoop) {
-    wingMotion.setDescentGlide(flight.descentGlide());
-    wingMotion.setHover(continuous);
+    if(groundWingIdle)wingMotion.groundIdle();
+    wingMotion.setDescentGlide(false); // Full-flight descent now uses physical wingbeats.
+    wingMotion.setHover(continuous||groundWingIdle);
     if(nativeSprintLoop)wingMotion.setHover(true);
     if (canParkFlap(playback.graphWeight,playback.flapWeight,playback.active,playback.gliding)
         && (result.flapped || playback.phase>0.001f) && wings.parkInvisibleFlap()) {
@@ -769,11 +875,11 @@ void update(RE::PlayerCharacter* player, float delta) {
     // A visual-only credit repeats the large stroke in native high-speed flight.
     // It supplies neither impulse nor stamina payment/extra speed. Space still
     // queues its normal physical/manual credit and sprint acceleration.
-    if(nativeSprintLoop&&wingMotion.pending()==0)wingMotion.pulse(false);
+    if((nativeSprintLoop||groundWingIdle)&&wingMotion.pending()==0)wingMotion.pulse(false);
     // Resetting a hidden sample clock must never block input or blend progress.
     wingMotion.update(dt, {playback.active, playback.gliding, playback.phase, playback.duration, flight.velocity().z,playback.flapWeight,playback.frequency,
-            flight.automaticRecoverySeconds(timing.upstrokeSeconds,timing.downstrokeSeconds,config.tuning),flight.highSpeed(),config.highSpeedFlapHoldSeconds},
-        continuous||nativeSprintLoop, timing);
+            flight.automaticRecoverySeconds(timing.upstrokeSeconds,timing.downstrokeSeconds,config.tuning),flight.highSpeed(),config.highSpeedFlapHoldSeconds,.50f},
+        continuous||nativeSprintLoop||groundWingIdle, timing);
     wings.updatePowerSound(match,playback);
     const auto charge=wingMotion.charge();
     if(charge.due){
@@ -797,8 +903,10 @@ void update(RE::PlayerCharacter* player, float delta) {
     }
     wingEntry.update(dt,playback.active && playback.gliding && playback.spreadActive,std::min(match.profile->timing.expandSeconds,0.40f));
     const bool parkedGlide=!wingMotion.wantsFlap() && wingBlend.value()==0;
-    wings.setFlapRate((parkedGlide || !wingEntry.complete())?0.01f:wingMotion.rate());
-    const bool wantsFlap=!flight.glideOnly()&&(continuous || nativeSprintLoop || wingMotion.wantsFlap());
+    const float flapPlaybackRate=wingMotion.rate()*(groundWingIdle?wingMotion.groundIdleRateMultiplier(config.tuning.groundWingIdleSpeedPercent)
+        :wingMotion.hasManualStroke()?1.f:flight.descentBeatRate(config.tuning,timing.upstrokeSeconds,timing.downstrokeSeconds));
+    wings.setFlapRate((parkedGlide || !wingEntry.complete())?0.01f:flapPlaybackRate);
+    const bool wantsFlap=!flight.glideOnly()&&(continuous || nativeSprintLoop || groundWingIdle || wingMotion.wantsFlap());
 
     if (wantsFlap!=blendTarget) {
         blendTarget=wantsFlap; blendTrace=0.8f; blendSample=0;
@@ -884,11 +992,11 @@ void update(RE::PlayerCharacter* player, float delta) {
             sprintHeld,controls.sprint,flight.speedMultiplier(),flight.horizontalMultiplier(controls.sprint,config.tuning),continuous,flight.hoverTarget()*RE::bhkWorld::GetWorldScaleInverse(),
             flight.hoverExcursion()*RE::bhkWorld::GetWorldScaleInverse(),bodyMotion.forward(),bodyMotion.glideSpeed(),flightFacing.active(),player->GetAngleZ(),controls.yaw,armedSprintLeanAngle(),flightBankAngle(),
             legs::flightPathPitch(target.x,target.y,target.z),flightPitchAngle());
-        SKSE::log::debug("Sample profile={} mode={} cmd=({:.2f},{:.2f},{:.2f}) measured=({:.2f},{:.2f},{:.2f}) supported={} flags={:08X} input=({:.2f},{:.2f}) fallStart={:.2f} playerZ={:.2f} health={:.1f}",
+        SKSE::log::debug("Sample profile={} mode={} cmd=({:.2f},{:.2f},{:.2f}) measured=({:.2f},{:.2f},{:.2f}) supported={} flags={:08X} input=({:.2f},{:.2f}) fallStart={:.2f} playerZ={:.2f} health={:.1f} rawSupported={} supportHandoff={}",
             lastProfile, static_cast<int>(flight.mode()), target.x, target.y, target.z,
             observedVelocity.x, observedVelocity.y, observedVelocity.z, supported(controller),
             static_cast<unsigned>(controller->flags.underlying()), controls.right, controls.forward,
-            controller->fallStartHeight, position.z, player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth));
+            controller->fallStartHeight, position.z, player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth),physicalSupported(controller),controllerSupport.pending());
         bool graphFly{}, graphPose{};
         player->GetGraphVariableBool("Wingflight_IsFlying", graphFly);
         player->GetGraphVariableBool("Wingflight_UsePose", graphPose);
@@ -906,19 +1014,21 @@ struct PlayerUpdate {
         if(nativeBatTravel.timedOut())SKSE::log::warn("Native Vampire Lord bat travel: no stop event within {:.1f}s; returning control to flight",vampire::BatTravel::limit);
         pauseVampireWingOverlay(nativeBatTravel.yielding());
         updateMenuPause(delta);
-        if(ready&&loaded&&actorGraphSafe(actor)&&actor->GetCharController()){
+        // Rebind before any pose/audio gate can observe an initial support flag.
+        if(ready&&loaded&&flight.active()&&actorGraphSafe(actor))
+            if(const auto live=actor->GetCharController();live&&live!=flightController)adoptFlightController(live);
+        if(ready&&loaded&&actorGraphSafe(actor)&&actor->GetCharController()
+            &&(flight.active()||currentExternalFlight(actor)==ExternalFlightOwner::none)){
             const auto match=wings.find(actor,flight.active());
             const auto controller=actor->GetCharController();
-            updateHeldWings(match,delta,jumpHeld(),!supported(controller),flight.flying(),flight.glideOnly(),menuOpen(),config.glideHoldSeconds);
+            updateHeldWings(match,delta,jumpHeld(),!supported(controller),flight.flying(),flight.glideOnly(),menuOpen(),config.glideHoldSeconds,
+                config.controlJumpWingAnimations,groundJumpRequested.load()||jumpWingPreview.pending());
         }else resetHeldWings();
         if(ready&&loaded&&actorGraphSafe(actor))
             updateFlightBreath(actor,flight.flying()&&actor->GetCharController()==flightController
                 &&flightController&&!presentationSupported(flightController));
         // Cancel immediately on physical support/replacement, before graph events.
         airborneExitEvents.update(actor,delta);
-        // Follow a replaced controller before leasing gravity or clearing fall time.
-        if(ready&&loaded&&flight.active()&&actorGraphSafe(actor))
-            if(const auto live=actor->GetCharController();live&&live!=flightController)adoptFlightController(live);
         // Disable native character acceleration before its update and retain a
         // reference for guaranteed restoration when a controller is replaced.
         if(ready&&loaded&&flight.flying()&&actorGraphSafe(actor)
@@ -939,19 +1049,19 @@ struct PlayerUpdate {
                     clearFall(controller);
                     // Check damaging ground impacts before either retaining full
                     // flight or handing the controller back to native landing.
-                    if (supported(controller) && flight.readyToLand() && !nativeBatTravel.yielding()) {
+                    if (physicalSupported(controller) && flight.readyToLand() && !nativeBatTravel.yielding()) {
                         const auto cell=actor->GetParentCell();
                         const bool continuousWorld=actor->GetWorldspace()==lastWorld
                             && !(lastCell!=cell&&(lastInterior||(cell&&cell->IsInteriorCell())))
                             && actor->GetPosition().GetDistance(lastPosition)<=4096.f;
                         const bool collided=flight.flying()&&!menuOpen()&&continuousWorld
                             &&flightCollision.update(actor,controller,delta,config.collision);
-                        if(collided||!flight.retainGroundContact(true,config.tuning)){
+                        if(collided||(supported(controller)&&!flight.retainGroundContact(true,config.tuning))){
                             airInput.cancel(jumpHeld());
                             if(flight.flying()&&actorGraphSafe(actor)&&actor->GetCharController()==controller)
                                 controller->SetLinearVelocityImpl(RE::hkVector4(0, 0, 0, 0));
                             finish(actor, match, collided?"damaging ground collision":"supporting ground before native update");
-                        }else flight.groundContact(actor->GetPosition().z/RE::bhkWorld::GetWorldScaleInverse());
+                        }else if(supported(controller))flight.groundContact(actor->GetPosition().z/RE::bhkWorld::GetWorldScaleInverse(),config.tuning);
                     }
                 }
             }
@@ -962,6 +1072,9 @@ struct PlayerUpdate {
         prepareLowerBody(actor,ready&&loaded&&flight.flying(),delta,flight.highSpeed(),flightBankTurn,
             legs::flightPathPitch(flightVelocity.x,flightVelocity.y,flightVelocity.z),
             {{flightVelocity.x,flightVelocity.y,flightVelocity.z},config.tuning.gravity});
+        const auto controllerBeforeNative=actorGraphSafe(actor)?actor->GetCharController():nullptr;
+        flightFootIK.update(actor,ready&&loaded&&flight.flying()&&actorGraphSafe(actor)
+            &&controllerBeforeNative&&controllerBeforeNative==flightController);
         original(actor, delta);
         const bool driven=nativeBatAnimationDriven(actor);
         const bool yielding=nativeBatTravel.afterNative(driven);
@@ -971,12 +1084,23 @@ struct PlayerUpdate {
         // Preserve the native request's direction/curve with the existing proxy
         // velocity setter; never move position, disable collisions or fake support.
         const auto controller=actorGraphSafe(actor)?actor->GetCharController():nullptr;
+        if(ready&&loaded&&flight.flying()&&controller){
+            if(controller!=flightController)adoptFlightController(controller);
+            // If native code replaced the proxy, its initial support value is
+            // not a completed observation. Wait until this same proxy has run.
+            if(controller==controllerBeforeNative&&!menuOpen()&&!yielding){
+                const bool pending=controllerSupport.pending();
+                controllerSupport.afterNative(physicalSupported(controller),delta);
+                if(pending&&!controllerSupport.pending())SKSE::log::debug("Flight controller support handoff settled: controller={:X} supported={}",
+                    reinterpret_cast<std::uintptr_t>(controller),supported(controller));
+            }
+        }
         const bool owned=ready&&loaded&&flight.flying()&&usesVampireLordBehavior(actor)&&controller&&controller==flightController;
         if(owned&&yielding&&driven&&std::isfinite(delta)&&delta>0&&!menuOpen()){
             const auto observed=velocity(controller);
             const auto& f=controller->forwardVec.quad.m128_f32;
             const auto& r=controller->velocityMod.quad.m128_f32;
-            const auto target=vampire::batVelocity(owned,yielding,driven,supported(controller),
+            const auto target=vampire::batVelocity(owned,yielding,driven,physicalSupported(controller),
                 {f[0],f[1],f[2]},{r[0],r[1],r[2]},{observed.x,observed.y,observed.z});
             if(target){
                 controller->SetLinearVelocityImpl(RE::hkVector4((*target)[0],(*target)[1],(*target)[2],0));
@@ -1122,6 +1246,9 @@ struct JumpFilter {
         if (ready && loaded && !menuOpen() && event) {
             const auto button = event->AsButtonEvent();
             if (button && std::string_view(button->QUserEvent().c_str()) == "Jump") {
+                // Preserve the active provider's handler chain, including key-up.
+                if(!flight.active()&&currentExternalFlight(RE::PlayerCharacter::GetSingleton())!=ExternalFlightOwner::none)
+                    return original(handler,event);
                 if (flight.flying()) { return false; }
                 const auto player = RE::PlayerCharacter::GetSingleton();
                 const auto controller = player ? player->GetCharController() : nullptr;
@@ -1147,7 +1274,17 @@ struct JumpFilter {
         if(accepted&&ready&&loaded&&event){
             const auto b=event->AsButtonEvent();const auto p=RE::PlayerCharacter::GetSingleton();
             if(b&&b->IsDown()&&std::string_view(b->QUserEvent().c_str())=="Jump"&&usable(p)&&controlsAvailable()
-                &&supported(p->GetCharController())&&wings.find(p).profile)groundJumpRequested=true;
+                &&supported(p->GetCharController())){
+                const auto match=wings.find(p);
+                if(match.profile){
+                    groundJumpRequested=true;
+                    // CanProcess has accepted this ground press, but the native
+                    // jump action/graph event has not run yet. Prime the wing
+                    // gate here so preview never blends over AWU's full opening.
+                    updateHeldWings(match,0,false,false,false,false,false,config.glideHoldSeconds,
+                        config.controlJumpWingAnimations,true);
+                }
+            }
         }
         return accepted;
     }
@@ -1177,6 +1314,7 @@ void load(SKSE::SerializationInterface* serialization) {
     resumeMode=state.resumeMode;resumeWait=0;preferredFlightMode=state.preferredMode;
 }
 void resetSession() {
+    flightExitWings.reset();wings.resetGroundRecovery();
     resetActorFlight();
     jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
     resetHeldWings();
@@ -1193,9 +1331,10 @@ void resetSession() {
     setGlideClipGuard(nullptr,false);
     prepareArmedSprintIdle(nullptr,false);
     prepareFlightPose(nullptr,false);
+    flightFootIK.release();
     managedAirAnimation = false; wings.clearVisual(); bodyRetry = 0;
     airInput.reset();jumpBoost.reset();groundJumpRequested=false;
-    flightFacing.release();bodyMotion.reset(); flight.reset(); clearInput(); resetGraphs = true; resumeMode = -1; resumeWait = 0;
+    flightFacing.release();bodyMotion.reset(); flight.reset();controllerSupport.reset(); clearInput(); resetGraphs = true; resumeMode = -1; resumeWait = 0;
     preferredFlightMode=Mode::free;
     flightBankTurn=0;
     flightRace = 0; lastCell = nullptr; lastWorld = nullptr; lastInterior = false; lastEvent.clear(); lastProfile.clear();
@@ -1237,6 +1376,11 @@ void message(SKSE::MessagingInterface::Message* message) {
             saveLiveSettings(std::filesystem::absolute("Data/SKSE/Plugins/Wingflight.ini"),candidate);
             applyLiveSettings(config,candidate,inverseScale);
             logging::configure(config.logSamples);
+            if(!config.controlJumpWingAnimations){
+                resetHeldWings();jumpWingPreview.reset();
+                if(jumpPreviewOwned&&!flight.active())wings.clearVisual(false);
+                jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
+            }
             SKSE::log::debug("NPC flight settings applied: Enabled={} FollowDistance={:.2f}; airborne actors land safely when disabled",config.actors.enabled,config.actors.followDistance);
             flightCollision.reset();
             applyLowerBodySettings(config);
@@ -1245,11 +1389,10 @@ void message(SKSE::MessagingInterface::Message* message) {
             return {};
         });
         if (!config.enabled) { SKSE::log::info("Disabled by configuration"); break; }
-        const auto data = RE::TESDataHandler::GetSingleton();
-        if (GetModuleHandleW(L"FlightFramework.dll") || data->LookupLoadedModByName("P1FlyingRing.esp")
-            || data->LookupLoadedLightModByName("P1FlyingRing.esp")) {
-            SKSE::log::error("Flight disabled: another flight controller is installed (FlightFramework/P1FlyingRing)"); break;
-        }
+        externalFrameworkPresent=GetModuleHandleW(L"FlightFramework.dll")!=nullptr;
+        externalFlyingToggle=RE::TESDataHandler::GetSingleton()->LookupForm<RE::TESGlobal>(0x285A,"P1FlyingRing.esp");
+        SKSE::log::info("External flight input guard revision=external-flight-input-1: FlightFramework present={} (FlightFramework_IsFlying); Flying Mod state available={} (P1FlyingRing.esp:00285A); installed but inactive providers do not block Wingflight",
+            externalFrameworkPresent,externalFlyingToggle!=nullptr);
         flightFacing.initialize();
         initializeAWUCompatibility(config.awuCompatibility);
         wings.resolve(config);

@@ -106,7 +106,14 @@ Rig inspect(RE::Actor* actor,Object* model,const WingProfile& profile){
     if(!anchor){out.reason="Wing bones have no common model branch";return out;}
     if(profile.rootNode.empty()&&lowerBodyAnchor(anchor)){out.reason="Branches from the pelvis or legs: clothing physics, not wings";return out;}
     if(!profile.rootNode.empty()){
-        Object* requested=resolve(profile.rootNode);
+        // RootNode must contain every weighted bone, so it is the common branch
+        // or one of its ancestors. Scans store body anchors such as
+        // NPC Spine2 [Spn2], which the model-bone list deliberately excludes.
+        Object* requested{};const auto stable=channel::stableWingNodeName(profile.rootNode);
+        unsigned hops{};for(auto node=anchor;node&&!requested&&hops++<64;node=node->parent){
+            if(node->name.c_str()&&channel::stableWingNodeName(node->name.c_str())==stable)requested=node;
+            if(node==out.body.get()||node==model)break;
+        }
         if(!requested){out.reason="Configured RootNode was not found";return out;}
         for(auto bone:weighted)if(!inside(bone,requested)){out.reason="Configured RootNode does not contain the model's wing skin";return out;}
         anchor=requested;
@@ -396,10 +403,6 @@ std::vector<WingCandidate> scanWingCandidates(RE::Actor* actor){
         c.profile.wingTemplate=channel::Template::awu;c.profile.wingPose=channel::defaults(c.profile.wingTemplate);
         defaultWingRegistrationSounds(c.profile,awuSound);
         const auto rig=inspect(actor,source.model.get(),c.profile);c.compatible=static_cast<bool>(rig);c.reason=rig.reason;
-        // Offer only rigs that a registration can actually store and read back.
-        if(c.compatible){bool storable=channel::storableWingName(channel::stableWingNodeName(rig.anchor->name.c_str()));
-            for(const auto& names:{rig.left,rig.right})for(const auto& name:names)storable&=channel::storableWingName(name);
-            if(!storable){c.compatible=false;c.reason="Wing bone names cannot be stored in a registration INI";}}
         c.bones=static_cast<unsigned>(rig.bones.size());c.pairs=static_cast<unsigned>(rig.left.size());
         if(c.compatible){c.profile.rootNode=channel::stableWingNodeName(rig.anchor->name.c_str());c.profile.leftRoots=rig.left;c.profile.rightRoots=rig.right;c.reason="Independent skinned wing branches found; choose a template and tune in flight";
             // Wings that carry their own wingbeat sequences play them by default.
@@ -419,7 +422,7 @@ std::string saveWingRegistration(WingProfile p,bool fromScanner){
         std::filesystem::path path;
         if(!p.registrationFile.empty())path=std::filesystem::absolute(p.registrationFile);
         else{
-            auto stem=std::filesystem::path(p.plugin).stem().string();for(auto& c:stem)if(!std::isalnum(static_cast<unsigned char>(c))&&c!='-'&&c!='_')c='_';
+            const auto stem=std::filesystem::path(p.plugin).stem().string();
             const auto id=!p.armorIDs.empty()?p.armorIDs.front():p.effectIDs.front();
             path=folder/fmt::format("Custom-{}-{}-{:06X}.ini",stem,p.armorIDs.empty()?"Effect":"Armor",id);
         }
@@ -440,7 +443,11 @@ std::string saveWingRegistration(WingProfile p,bool fromScanner){
 
 struct RegisteredWingRuntime::State : std::enable_shared_from_this<State> {
     struct Bone {RigBone rig;legs::Quaternion reference,before,output;bool wrote{};legs::Quaternion editFrom;
-        std::array<RE::NiPointer<RE::NiInterpolator>,3> clips;}; // Private copies of authored power/fast/spread tracks.
+        std::array<RE::NiPointer<RE::NiInterpolator>,3> clips; // Private copies of authored power/fast/spread tracks.
+        // Authored shaping, prepared at binding: the mean power-stroke pose, the
+        // farthest controlled descendant in this bone's frame, the body's inward
+        // X sign, and a root's highest/lowest power-stroke elevation.
+        legs::Quaternion center;bool centered{};std::optional<std::array<float,3>> tip;float inward{},highest{},lowest{};};
     std::mutex mutex;RE::ActorHandle actor;RE::NiPointer<Object> body,model,anchor;
     RE::NiMatrix3 referenceToAnchor;
     const WingProfile* profile{};std::vector<Bone> bones;LogicalWings clocks;double flowTime{};
@@ -477,7 +484,68 @@ struct RegisteredWingRuntime::State : std::enable_shared_from_this<State> {
         clipFile=std::move(clips.file);authored=bound>0;
         SKSE::log::info("Registered wing authored sequences: bones={}/{} privateTracks={} unsupportedTracks={} durations={:.4f}/{:.4f}/{:.4f} fromFile={}; model keys unchanged",
             bound,bones.size(),copies.size(),foreign,clipDuration[0],clipDuration[1],clipDuration[2],clipFile!=nullptr);
+        if(authored)prepareShaping();
         return bound;
+    }
+    std::optional<legs::Quaternion> sampleClip(const Bone& b,unsigned i,float phase){
+        if(!b.clips[i])return std::nullopt;
+        visual::Sample value{};auto& output=*reinterpret_cast<RE::NiQuatTransform*>(&value);
+        if(!b.clips[i]->Update1(clipBegin[i]+phase*clipDuration[i],b.rig.node.get(),output))return std::nullopt;
+        const auto native=rotation(b.rig.node->local.rotate);
+        const auto result=visual::validSample(value,{0,0,0,native.w,native.x,native.y,native.z,1},b.rig.node.get());
+        return legs::Quaternion{result.qx,result.qy,result.qz,result.w};
+    }
+    void prepareShaping(){
+        auto below=[](const Object* node,const Object* ancestor){unsigned hops{};
+            for(auto p=node?node->parent:nullptr;p&&hops++<64;p=p->parent)if(p==ancestor)return true;return false;};
+        for(auto& b:bones){
+            const Bone* farthest{};
+            for(const auto& o:bones)if(o.rig.side==b.rig.side&&o.rig.pair==b.rig.pair&&below(o.rig.node.get(),b.rig.node.get())&&(!farthest||o.rig.span>farthest->rig.span))farthest=&o;
+            const auto& world=b.rig.node->world;
+            if(farthest&&world.scale>.0001f){
+                const auto offset=world.rotate.Transpose()*(farthest->rig.node->world.translate-world.translate)/world.scale;
+                if(offset.Length()>.01f)b.tip=std::array{offset.x,offset.y,offset.z};
+            }
+            if(b.rig.depth||!b.tip||!anchor)continue;
+            // Which way the body lies, from the root's rest chord in the reference frame.
+            const auto chord=referenceToAnchor.Transpose()*(anchor->world.rotate.Transpose()*(farthest->rig.node->world.translate-world.translate));
+            const float inward=chord.x>0?-1.f:1.f;
+            for(auto& o:bones)if(o.rig.side==b.rig.side&&o.rig.pair==b.rig.pair)o.inward=inward;
+        }
+        constexpr unsigned samples=48;std::array<legs::Quaternion,samples> poses;unsigned shaped{};
+        for(auto& b:bones){
+            unsigned count{};
+            for(unsigned k=0;k<samples;++k)if(const auto q=sampleClip(b,0,static_cast<float>(k)/samples))poses[count++]=*q;
+            if(count<samples)continue;
+            b.center=channel::meanRotation(poses.data(),count);b.centered=true;++shaped;
+            if(b.rig.depth||!b.tip)continue;
+            RE::NiMatrix3 basis;auto parent=b.rig.node->parent;unsigned hops{};
+            while(parent&&parent!=anchor.get()&&hops++<64){basis=parent->local.rotate*basis;parent=parent->parent;}
+            if(!anchor||parent!=anchor.get())continue;
+            const auto up=channel::wingParentAxis(basis.entry,referenceToAnchor.entry,{0,0,1});
+            b.highest=-90;b.lowest=90;
+            for(unsigned k=0;k<count;++k){const float e=channel::elevationDegrees(channel::rotated(poses[k],*b.tip),up);
+                b.highest=std::max(b.highest,e);b.lowest=std::min(b.lowest,e);}
+            SKSE::log::debug("Registered wing authored root {}: power-stroke elevation {:.1f}..{:.1f} deg",b.rig.node->name.c_str(),b.lowest,b.highest);
+        }
+        SKSE::log::info("Registered wing authored shaping prepared: bones={}/{}",shaped,bones.size());
+    }
+    // Amplitude about the mean power-stroke pose; depth on roots and curl on
+    // joints, both weighted by how low this pair's root currently is.
+    legs::Quaternion shape(const Bone& b,legs::Quaternion target,const RE::NiMatrix3& basis,const channel::PoseSettings& p,
+        std::array<std::array<float,2>,channel::PoseSettings::maxPairs>& lowered){
+        if(b.centered)target=channel::scaleAbout(b.center,target,p.authoredAmplitude);
+        if(!b.tip)return target;
+        auto& weight=lowered[std::min(b.rig.pair,channel::PoseSettings::maxPairs-1)][b.rig.side>0];
+        const auto direction=channel::rotated(target,*b.tip);
+        if(!b.rig.depth){
+            if(!b.centered)return target;
+            const auto up=channel::wingParentAxis(basis.entry,referenceToAnchor.entry,{0,0,1});
+            weight=channel::loweredWeight(channel::elevationDegrees(direction,up),b.highest,b.lowest);
+            return channel::turnToward(target,direction,{-up[0],-up[1],-up[2]},p.authoredDepthDegrees*weight);
+        }
+        const auto inward=channel::wingParentAxis(basis.entry,referenceToAnchor.entry,{b.inward,0,0});
+        return channel::turnToward(target,direction,inward,p.authoredCurlDegrees*weight*std::max(0.f,b.rig.span-b.rig.parentSpan));
     }
     legs::Quaternion authoredPose(const Bone& b,const std::array<float,3>& phases,const WaveWeights& w,legs::Quaternion native){
         const visual::Sample current{0,0,0,native.w,native.x,native.y,native.z,1};
@@ -529,6 +597,7 @@ struct RegisteredWingRuntime::State : std::enable_shared_from_this<State> {
         // Explicit fold/feather articulation owns the raised pose, so flow no
         // longer has to be suppressed there to keep the wing extended.
         const bool articulated=channel::articulated(p,kind);
+        std::array<std::array<float,2>,channel::PoseSettings::maxPairs> lowered{};
         for(auto& b:bones){
             // Authored leaves bones without a track to the model's own motion.
             if(authored&&!b.clips[0]&&!b.clips[1]&&!b.clips[2])continue;
@@ -549,6 +618,7 @@ struct RegisteredWingRuntime::State : std::enable_shared_from_this<State> {
             if(authored){
                 const auto& m=pairs[std::min(b.rig.pair,channel::PoseSettings::maxPairs-1)];
                 auto target=authoredPose(b,{m.power,m.fast,m.spread},w,native);
+                if(w.flap+w.fast+w.spread>0)target=shape(b,target,basis,p,lowered);
                 target=channel::tiltWingRoot(target,p.forwardTiltDegrees,b.rig.depth,tiltAxis.x,tiltAxis.y,tiltAxis.z);
                 if(!b.rig.depth&&pitch!=0&&w.flap>0)target=legs::bankAroundAxis(target,-pitch*w.flap*.25f,tiltAxis.x,tiltAxis.y,tiltAxis.z);
                 b.output=channel::poseOutput(native,target,b.editFrom,ownership,editBlend);

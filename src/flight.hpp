@@ -16,6 +16,11 @@ inline constexpr float highSpeedHeightCorrectionSpeed=4.0f;
 struct Tuning {
     bool flapOnHighSpeedEntry{true};
     bool endFlightOnGround{true};
+    bool groundWingIdle{false};
+    float groundHoverHeight{0.5f}; // Havok units above a retained floor.
+    float groundBeatDistance{0.5f}; // Havok units to the floor below for normal-speed ground beats.
+    float descentSpeed{3.f}; // Havok units/s the slowed ground beats aim to sink at.
+    float groundWingIdleSpeedPercent{75.f}; // Visual-only ground beats; manual beats keep full speed.
     float speed{7.0f}, acceleration{4.0f}, drag{2.5f};
     float sprintSpeedMultiplier{1.50f};
     float turnResponse{12.0f};
@@ -54,9 +59,15 @@ struct Observation {
     float autoLeadSeconds{0.65f},autoDownstrokeSeconds{0.34f};
     bool wingBusy{};
     float reservedManualStamina{},reservedAutoStamina{};
+    float groundDistance{INFINITY}; // Havok units down to the floor; infinity when no hit.
 };
 struct Outcome { bool flapped{}, landed{}, aborted{}, released{}; float cost{}; bool highSpeedEntryFlap{},automaticFlapped{}; };
 
+// Floor distance below the feet from a downward ray of `range` Havok units
+// that starts `startAbove` above the feet.
+inline float rayFloorDistance(float range, float startAbove, float hitFraction) {
+    return std::max(0.f, range*hitFraction-startAbove);
+}
 inline float fallHeightInGameUnits(float havokHeight, float inverseWorldScale) {
     return havokHeight * inverseWorldScale;
 }
@@ -84,12 +95,25 @@ public:
     bool flying() const { return active_&&!glideOnly_; }
     bool glideOnly() const { return active_&&glideOnly_; }
     bool highSpeed() const { return highSpeed_; }
-    bool descentGlide() const { return flying()&&!continuous_&&mode_==Mode::free&&!highSpeed_&&controlledDescent_; }
-    bool automaticHover() const { return flying()&&!groundRetained_&&!continuous_&&mode_==Mode::free&&!highSpeed_&&!controlledDescent_; }
+    bool automaticDescent() const { return flying()&&!continuous_&&!highSpeed_&&controlledDescent_; }
+    bool automaticHover() const { return flying()&&!groundIdle_&&groundIdleGrace_<=0&&!continuous_&&(mode_==Mode::free||normalGroundHover_||controlledDescent_)&&!highSpeed_; }
+    bool normalGroundHover() const { return normalGroundHover_; }
+    float descentBeatRate(const Tuning& t,float upSeconds,float downSeconds) const {
+        if(!automaticDescent()&&(!normalGroundHover_||!groundDescending_))return 1.f;
+        // Keep full wingbeats and steer their speed around the rate whose lift
+        // just holds altitude: sinking faster than DescentSpeed beats
+        // faster, sinking slower beats slower. Never above normal speed. The
+        // same scale drives visible progress, so lift follows the animation.
+        // The trim learns what the estimate misses (frame rate, clip timing).
+        const float hold=t.gravity*(upSeconds+downSeconds)/t.autoFlapImpulse;
+        const float error=descentSink_-std::clamp(t.descentSpeed,.5f,8.f);
+        return std::clamp(hold*(1+error/(t.gravity*groundDescentResponse)+descentTrim_),groundDescentMinimumRate,1.f);
+    }
+    bool groundWingIdle(const Tuning& t) const { return !t.endFlightOnGround&&t.groundWingIdle&&flying()&&!continuous_&&!highSpeed_&&(groundRetained_||groundIdleGrace_>0); }
     bool continuousFlight() const { return flying()&&continuous_; }
     void setContinuousFlight(bool enabled) {
         if(continuous_==enabled)return;
-        continuous_=enabled;hoverAnchor_=false;hoverIntegral_=0;autoHover_.reset();entryFlapPending_=false;
+        continuous_=enabled;normalGroundHover_=false;hoverAnchor_=false;hoverIntegral_=0;autoHover_.reset();entryFlapPending_=false;
         speedBoost_=boostHold_=boostFadeAge_=boostFadeStart_=0;
         if(enabled){mode_=Mode::free;velocity_.z=0;}
     }
@@ -111,9 +135,20 @@ public:
     bool presentationSupported(bool supported,const Tuning& t) const { return supported&&!retainGroundContact(supported,t); }
     // A real floor absorbs descent; it must not store a dive or an old altitude
     // correction. Keep upward manual lift and horizontal flight movement intact.
-    void groundContact(float height) {
+    void groundContact(float height,const Tuning& t) {
         if(!flying())return;
-        groundRetained_=true;velocity_.z=std::max(0.0f,velocity_.z);
+        groundDescending_=false;
+        groundRetained_=true;groundIdle_=!t.endFlightOnGround&&t.groundWingIdle;
+        groundIdleGrace_=groundIdle_?.18f:0;velocity_.z=std::max(0.0f,velocity_.z);
+        // Retain the original low-altitude reference and continuous beat
+        // scheduling in both K modes. Falling slows beats, never pauses them.
+        if(!groundIdle_){
+            if(!t.endFlightOnGround&&!continuous_&&!highSpeed_&&velocity_.z<=0&&std::isfinite(height)){
+                normalGroundHover_=true;autoHover_.settle(height+t.groundHoverHeight);
+            }
+            return;
+        }
+        normalGroundHover_=false;
         hoverAnchor_=false;hoverIntegral_=0;autoHover_.reset();
         if(std::isfinite(height)){hoverHeight_=height;autoHover_.observe(height);}
     }
@@ -143,8 +178,13 @@ public:
             return result; }
         dt = std::min(dt, 0.1f);  // Never catch up a loading hitch with a large impulse.
         age_ += dt; cooldown_ = std::max(0.0f, cooldown_ - dt);
+        groundIdleGrace_=(t.endFlightOnGround||!t.groundWingIdle)?0:std::max(0.f,groundIdleGrace_-dt);
         groundRetained_=retainGroundContact(observed.supported,t);
-        if(groundRetained_)groundContact(observed.height);
+        if(normalGroundHover_&&(t.endFlightOnGround||t.groundWingIdle||continuous_)){
+            normalGroundHover_=false;autoHover_.reset();
+        }
+        groundIdle_=groundRetained_&&t.groundWingIdle;
+        if(groundRetained_)groundContact(observed.height,t);
         if (!observed.supported) { leftGround_ = true; }
         if (!groundRetained_ && observed.supported && age_ > 0.3f && (velocity_.z <= 0 || age_ > 1.0f)) {
             contact_ += dt;
@@ -158,12 +198,12 @@ public:
         highSpeed_=!glideOnly_&&input.sprint&&std::hypot(input.right,input.forward)>0.05f;
         if(!highSpeed_ || continuous_ || !t.flapOnHighSpeedEntry)entryFlapPending_=false;
         else if(!wasFast)entryFlapPending_=true;
-        if(wasFast!=highSpeed_){hoverAnchor_=false;hoverIntegral_=0;autoHover_.reset();}
+        if(wasFast!=highSpeed_){normalGroundHover_=false;hoverAnchor_=false;hoverIntegral_=0;autoHover_.reset();}
         if (input.cycle && !glideOnly_&&!continuous_) { mode_ = mode_==Mode::flap ? Mode::free : Mode::flap; }
         // A manual beat adds phase-driven lift without changing the main mode.
 
         if (mode_!=previousMode) {
-            hoverAnchor_=false;hoverIntegral_=0;autoHover_.reset();
+            hoverAnchor_=false;hoverIntegral_=0;if(!normalGroundHover_)autoHover_.reset();
             if(mode_==Mode::free) { speedBoost_=boostHold_=boostFadeAge_=boostFadeStart_=0; }
         }
         if (mode_ == Mode::free) {
@@ -176,7 +216,16 @@ public:
                 mode_ = Mode::flap; result.cost = 0;
             }
         }
-        controlledDescent_=!glideOnly_&&mode_==Mode::free&&!highSpeed_&&input.down;
+        // Manual mode sinks with automatic beats without requiring Ctrl.
+        // Real ground behavior takes precedence. Without enough stamina, retain
+        // ordinary glide rather than producing unpaid lift or switching modes.
+        controlledDescent_=!glideOnly_&&!continuous_&&!highSpeed_&&!normalGroundHover_&&!groundIdle_
+            &&(mode_==Mode::flap||input.down)
+            &&observed.stamina-result.cost>=t.autoFlapCost;
+        if(controlledDescent_!=wasDescending){
+            descentSink_=-velocity_.z;descentTrim_=0;
+            autoHover_.reset();autoHover_.observe(observed.height);
+        }
         // Decay existing speed smoothly; a new accepted sprint beat refreshes
         // the hold and adds one bounded increment to the current bonus.
         float fadeDt=dt;
@@ -201,6 +250,8 @@ public:
                 boostHold_=t.flapSpeedHoldSeconds;boostFadeAge_=0;boostFadeStart_=speedBoost_;
             }
         }
+        // Manual takeoff leaves the floor cycle without changing K's mode.
+        if(result.flapped)normalGroundHover_=false;
         float x = input.right, y = input.forward;
         const auto magnitude = std::hypot(x, y);
         if (magnitude > 1) { x /= magnitude; y /= magnitude; }
@@ -259,7 +310,7 @@ public:
             const float target=climb+4.0f*error+hoverIntegral_;
             velocity_.z=approach(velocity_.z,target,t.acceleration,dt);
             velocity_.z=std::clamp(velocity_.z,-t.glideFall-highSpeedHeightCorrectionSpeed,t.continuousRiseSpeed+highSpeedHeightCorrectionSpeed);
-        } else if (glideOnly_ || (mode_ == Mode::flap && !highSpeed_)) {
+        } else if (glideOnly_ || (mode_ == Mode::flap && !highSpeed_&&!normalGroundHover_&&!controlledDescent_)) {
             velocity_.z = std::max(velocity_.z - t.gravity * dt, -t.glideFall);
         } else if(!highSpeed_) {
             if(!std::isfinite(observed.height)) {
@@ -278,16 +329,13 @@ public:
                 if(!controlledDescent_&&velocity_.z>0)autoHover_.manualClimb();
             }
             if(result.flapped)autoHover_.manualClimb();
-            if(controlledDescent_) {
-                // Cap downward momentum only; Space lift must remain effective.
-                velocity_.z=std::max(velocity_.z,-t.glideFall);
-            } else if(!groundRetained_&&!observed.wingBusy&&!result.flapped
+            if(!groundIdle_&&groundIdleGrace_<=0&&!observed.wingBusy&&!result.flapped
                 &&autoHover_.due(velocity_.z,t.gravity,observed.autoLeadSeconds,
                     observed.autoDownstrokeSeconds,t.autoFlapImpulse)) {
                 if(observed.stamina-result.cost-observed.reservedAutoStamina>=t.autoFlapCost) {
                     result.automaticFlapped=true; // Reserve now; pay only on visible downstroke progress.
                 } else {
-                    mode_=Mode::flap;autoHover_.reset();
+                    mode_=Mode::flap;normalGroundHover_=false;controlledDescent_=false;autoHover_.reset();
                     velocity_.z=std::max(velocity_.z,-t.glideFall);
                 }
             }
@@ -309,16 +357,33 @@ public:
             velocity_.z=std::clamp(climb+4.0f*error+hoverIntegral_,-limit,limit);
         }
         if(groundRetained_)velocity_.z=std::max(0.0f,velocity_.z);
+        // Near the floor below, keep the normal cadence and aim at that floor,
+        // so a slope or new floor never inherits an old altitude. Farther away
+        // slow down; the band between keeps one beat's apex from flickering.
+        if(!normalGroundHover_)groundDescending_=false;
+        else if(std::isfinite(observed.groundDistance)&&std::isfinite(observed.height)){
+            const float distance=std::max(0.f,observed.groundDistance);
+            if(distance<=t.groundBeatDistance)groundDescending_=false;
+            else if(distance>t.groundBeatDistance+groundBeatBand)groundDescending_=true;
+            if(!groundDescending_)autoHover_.settle(observed.height-distance+t.groundHoverHeight);
+        } else if(!observed.supported&&velocity_.z<0)groundDescending_=true;
+        // Average out the per-beat swing; start from the real speed on entry.
+        if(!groundDescending_&&!automaticDescent()){descentSink_=-velocity_.z;descentTrim_=0;}
+        else {
+            descentSink_+=(-velocity_.z-descentSink_)*std::min(1.f,dt/groundSinkSmoothing);
+            // Learn only near the target, not while the fall is still building.
+            const float error=descentSink_-std::clamp(t.descentSpeed,.5f,8.f);
+            if(std::abs(error)<1)descentTrim_=std::clamp(descentTrim_+error*dt/(t.gravity*groundDescentTrimSeconds),-.5f,.5f);
+        }
         return result;
     }
     // Called once per rendered downstroke sample, after the animation policy.
     // No timer fallback: an absent/held/hidden clip cannot produce phantom lift.
     void applyWingLift(float fraction, bool firstSample, const Tuning& t,bool automatic=false) {
-        if(automatic&&groundRetained_)return;
+        if(automatic&&!t.endFlightOnGround&&t.groundWingIdle&&(groundRetained_||groundIdleGrace_>0))return;
         if (!active_ || glideOnly_ || highSpeed_ || continuous_ || !std::isfinite(fraction) || fraction<=0) { return; }
-        if(mode_==Mode::free){
-            // Descend suppresses automatic lift, never a requested Space stroke.
-            if(controlledDescent_&&automatic)return;
+        if(!automatic)normalGroundHover_=false;
+        if(mode_==Mode::free||(automatic&&(normalGroundHover_||controlledDescent_))){
             if(firstSample){
                 if(automatic)autoHover_.automaticDownstroke();
                 else {autoHover_.manualClimb();velocity_.z=std::max(0.0f,velocity_.z);}
@@ -327,7 +392,12 @@ public:
             // Cap only the newly added lift. An inherited faster upward velocity
             // must not be abruptly cut to MaxRise. Only a manual stroke keeps
             // the existing fall-arrest behavior; automatic beats add lift gradually.
-            velocity_.z+=std::min(lift,std::max(0.0f,t.maxRise-velocity_.z));return;
+            // Near a retained floor, automatic beats coast up to the low hover
+            // reference instead of spending their whole airborne budget.
+            float ceiling=t.maxRise;
+            if(automatic&&!t.endFlightOnGround&&!t.groundWingIdle&&autoHover_.grounded())
+                ceiling=std::min(ceiling,autoHover_.riseCeiling(t.gravity));
+            velocity_.z+=std::min(lift,std::max(0.0f,ceiling-velocity_.z));return;
         }
         if(automatic)return;
         if (firstSample) { velocity_.z=std::max(0.0f,velocity_.z); }
@@ -340,22 +410,29 @@ public:
     bool resumeAfterNativeTravel(float height) {
         if(!active_||!std::isfinite(height))return false;
         velocity_={};reversing_=false;hoverAnchor_=false;hoverIntegral_=0;contact_=0;
-        autoHover_.reset();autoHover_.observe(height);
+        normalGroundHover_=false;autoHover_.reset();autoHover_.observe(height);
         entryFlapPending_=false;return true;
     }
     void rejectAutomaticStroke(const Tuning& t){
         if(!automaticHover())return;
-        mode_=Mode::flap;autoHover_.reset();controlledDescent_=false;velocity_.z=std::max(velocity_.z,-t.glideFall);
+        mode_=Mode::flap;normalGroundHover_=false;autoHover_.reset();controlledDescent_=false;velocity_.z=std::max(velocity_.z,-t.glideFall);
     }
 private:
-    bool active_{}, leftGround_{},glideOnly_{},highSpeed_{},continuous_{},groundRetained_{};
+    bool active_{}, leftGround_{},glideOnly_{},highSpeed_{},continuous_{},groundRetained_{},groundIdle_{};
+    bool normalGroundHover_{},groundDescending_{};
+    static constexpr float groundBeatBand=.25f; // Havok units above GroundBeatDistance.
+    // Sink-speed feedback: seconds of smoothing, seconds to close the error,
+    // seconds for the trim to absorb a steady error, and the slowest beat
+    // while still falling slower than the target.
+    static constexpr float groundSinkSmoothing=.8f,groundDescentResponse=1.5f,groundDescentTrimSeconds=3.f,groundDescentMinimumRate=.25f;
+    float descentSink_{},descentTrim_{};
     bool entryFlapPending_{};
     bool controlledDescent_{};
     bool reversing_{};
     float reversalHeading_{};
     Mode mode_{Mode::flap};
     Vec3 velocity_{};
-    float cooldown_{}, age_{}, contact_{};
+    float cooldown_{}, age_{}, contact_{},groundIdleGrace_{};
     float speedBoost_{},boostHold_{},boostFadeAge_{},boostFadeStart_{};
     bool hoverAnchor_{};
     float hoverHeight_{},hoverIntegral_{};

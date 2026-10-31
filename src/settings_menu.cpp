@@ -5,6 +5,7 @@
 #include "registered_wings.hpp"
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -108,19 +109,43 @@ void renderSection(const char* section) {
     ImGuiMCP::TextWrapped("Adjust values here, then select Apply and Save. Settings are shared across characters.");
     ImGuiMCP::TextWrapped("Hover over a parameter for its meaning. Ctrl-click a slider to enter an exact value.");
     if(std::string_view(section)=="FreeFlight")
-        ImGuiMCP::TextWrapped("Automatic beats add lift during the downstroke, then coast under Flight/Gravity. Hold Descend for spread-wing slow descent; Space can still climb. Release resumes hovering at the new altitude. High-speed flight ignores Descend and follows the camera. AutoFlapCost = 0 makes automatic beats free.");
+        ImGuiMCP::TextWrapped("Automatic beats add lift during the downstroke, then coast under Flight/Gravity. Hold Descend for automatic wingbeats targeting Flight/DescentSpeed; Space still gives a full manual beat. Manual mode uses the same descending beats without holding Descend. Release resumes hovering at the new altitude. High-speed flight ignores Descend and follows the camera. AutoFlapCost = 0 makes automatic beats free.");
     if(std::string_view(section)=="Flight")
         ImGuiMCP::TextWrapped("Fairy/Chaurus wings use continuous flight: hover at rest, hold Jump to rise, hold Descend to descend. K is ignored. Camera direction controls high-speed flight. Descent uses GlideFallSpeed; RiseSpeed is in AWU Fairy.ini and requires a restart. Wingbeat impulse/cost settings do not apply.");
     ImGuiMCP::BeginDisabled(pending||capture!=0);
-    for(const auto& setting:liveFloatSettings)if(std::string_view(setting.section)==section) {
+    auto slider=[](const LiveFloatSetting& setting){
         ImGuiMCP::SliderFloat(setting.key,&setting.value(draft),setting.minimum,setting.maximum,"%.2f");
         tooltip(setting.help);
-    }
+    };
+    // Draw only the parameter for the selected ground behavior; keep both values.
+    const auto groundHover=std::find_if(liveFloatSettings.begin(),liveFloatSettings.end(),
+        [](const auto& setting){return std::string_view(setting.key)=="GroundHoverHeight";});
+    const auto groundSpeed=std::find_if(liveFloatSettings.begin(),liveFloatSettings.end(),
+        [](const auto& setting){return std::string_view(setting.key)=="GroundWingIdleSpeedPercent";});
+    const auto groundBeat=std::find_if(liveFloatSettings.begin(),liveFloatSettings.end(),
+        [](const auto& setting){return std::string_view(setting.key)=="GroundBeatDistance";});
+    for(const auto& setting:liveFloatSettings)if(std::string_view(setting.section)==section
+        &&&setting!=&*groundHover&&&setting!=&*groundSpeed&&&setting!=&*groundBeat)slider(setting);
     if(std::string_view(section)=="Flight") {
         ImGuiMCP::Checkbox("End Flight on Ground",&draft.tuning.endFlightOnGround);
-        tooltip("On: touching supporting ground ends full flight. Off: keep flight movement and poses; Jump lifts off again. Automatic lift pauses while grounded. Held-Jump glide, damaging collisions and other flight interruptions keep their normal exit rules. Apply and Save takes effect immediately.");
+        tooltip("On: supporting ground ends full flight. Off: retain flight and use Ground Contact Behavior below. Held-Jump glide, damaging collisions and other flight interruptions keep their normal exit rules.");
+        ImGuiMCP::BeginDisabled(draft.tuning.endFlightOnGround);
+        int groundMode=draft.tuning.groundWingIdle?1:0;
+        const char* groundChoices[]={"Normal flight (keep automatic lift)","Ground wing idle (Space to take off)"};
+        if(ImGuiMCP::Combo("Ground Contact Behavior",&groundMode,groundChoices,2))draft.tuning.groundWingIdle=groundMode==1;
+        tooltip("Only with End Flight on Ground off. Normal flight uses low ground beats in both K modes, up to GroundHoverHeight. Within GroundBeatDistance of the floor below, beats keep the normal cadence; farther away, beat speed adjusts itself so you sink at about DescentSpeed. Space leaves this floor cycle without changing the selected K mode. Ground wing idle keeps visual beats without automatic lift or beat cost; Space still lifts off. Apply and Save switches live.");
+        if(draft.tuning.groundWingIdle){
+            ImGuiMCP::SliderFloat("Ground wing idle speed (%)",&groundSpeed->value(draft),groundSpeed->minimum,groundSpeed->maximum,"%.0f%%");
+            tooltip(groundSpeed->help);
+        }else{
+            slider(*groundHover);slider(*groundBeat);}
+        ImGuiMCP::EndDisabled();
         ImGuiMCP::Checkbox("DisableSprintWhenArmed",&draft.disableSprintWhenArmed);
         tooltip("Disable armed sprint flight. Drawing a weapon also ends high-speed flight. Ground sprint is unchanged.");
+    }
+    if(std::string_view(section)=="Jump") {
+        ImGuiMCP::Checkbox("Control Jump Wing Animations",&draft.controlJumpWingAnimations);
+        tooltip("Control partial jump opening and require held Jump for AWU dragon/feather airborne flutter, including falling after flight exit or stepping off a ledge. While swimming, block only wing jump-opening events; normal ascent and swimming animations stay native. Sneaking, weapon draw and casting stay native. Off restores native jump/fall wing behavior. Full flight and the separate Glide/Enabled setting are unchanged. Apply and Save takes effect immediately.");
     }
     if(std::string_view(section)=="General") {
         ImGuiMCP::Checkbox("Detailed Logging",&draft.logSamples);

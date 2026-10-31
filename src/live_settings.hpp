@@ -35,7 +35,11 @@ inline constexpr auto liveFloatSettings = std::to_array<LiveFloatSetting>({
     {"Flight","FlapImpulse","Vertical velocity budget per large wingbeat, delivered during its downstroke. Not a height distance.",0.1f,10,[](Configuration& c)->float&{return c.tuning.lift;}},
     {"Flight","MaxRise","Upper bound for wingbeat-added upward velocity, not height. Inherited faster native upward momentum is not abruptly braked in free flight.",0.5f,15,[](Configuration& c)->float&{return c.tuning.maxRise;}},
     {"Flight","Gravity","Shared simulated downward acceleration (Havok units/s^2) in manual and free flight. Native player gravity is temporarily disabled during full flight.",0.1f,20,[](Configuration& c)->float&{return c.tuning.gravity;}},
-    {"Flight","GlideFallSpeed","Maximum slow-descent velocity in manual glide, free-flight held Descend, and outside-flight held-Jump glide.",0.1f,8,[](Configuration& c)->float&{return c.tuning.glideFall;}},
+    {"Flight","GlideFallSpeed","Glide speed limit when automatic wingbeat stamina is unavailable, for outside-flight held-Jump glide, and for Continuous flight descent.",0.1f,8,[](Configuration& c)->float&{return c.tuning.glideFall;}},
+    {"Flight","GroundHoverHeight","Only with End Flight on Ground off and normal ground behavior: automatic beats in either K mode that start on the floor lift only to this clearance (Havok units; 1 is about 70 Skyrim units). Space keeps its full lift.",0.1f,3,[](Configuration& c)->float&{return c.tuning.groundHoverHeight;}},
+    {"Flight","GroundBeatDistance","Only with End Flight on Ground off and normal ground behavior: after touching down, automatic beats keep the normal speed while the floor below (vertical ray) is within this distance, and aim GroundHoverHeight above it. Farther away they slow, so you sink gently. Havok units; 1 is about 70 Skyrim units.",0.1f,3,[](Configuration& c)->float&{return c.tuning.groundBeatDistance;}},
+    {"Flight","DescentSpeed","Target sink speed in Havok units per second: manual flight without Space, Free Flight while holding Descend, and Normal ground flight farther than GroundBeatDistance from the floor. Wingbeats speed up when you fall faster and slow down when you fall slower (never faster than normal). Each beat still swings the speed a little around the target; at the top of the range a swing can pass Collision/MinImpactSpeed (8 by default) and cause impact damage. Apply and Save takes effect immediately.",0.5f,8,[](Configuration& c)->float&{return c.tuning.descentSpeed;}},
+    {"Flight","GroundWingIdleSpeedPercent","Ground wing idle only: visual wingbeat speed as a percentage of normal speed. 100 = normal; 75 = 25% slower; 50 = half speed; 120 = 20% faster; 200 = double speed. Manual Space wingbeats keep their normal speed. Apply and Save takes effect immediately.",10,200,[](Configuration& c)->float&{return c.tuning.groundWingIdleSpeedPercent;}},
     {"Flight","FlapCooldown","Minimum seconds between accepted manual wingbeats.",0.1f,2,[](Configuration& c)->float&{return c.tuning.flapCooldown;}},
     {"Flight","FlapSpeedMultiplier","Each accepted sprint wingbeat adds this value minus 1 to the extra speed multiplier.",1,3,[](Configuration& c)->float&{return c.tuning.flapSpeedMultiplier;}},
     {"Flight","MaxFlapSpeedMultiplier","Upper limit of the separate wingbeat speed bonus.",1,4,[](Configuration& c)->float&{return c.tuning.maxFlapSpeedMultiplier;}},
@@ -95,9 +99,11 @@ inline void applyLiveSettings(Configuration& current, Configuration candidate, f
     for (const auto& setting : liveFloatSettings) setting.value(current)=setting.value(candidate);
     current.disableSprintWhenArmed=candidate.disableSprintWhenArmed;
     current.tuning.endFlightOnGround=candidate.tuning.endFlightOnGround;
+    current.tuning.groundWingIdle=candidate.tuning.groundWingIdle;
     current.actors.enabled=candidate.actors.enabled;
     current.actors.airCombat=candidate.actors.airCombat;
     current.logSamples=candidate.logSamples;
+    current.controlJumpWingAnimations=candidate.controlJumpWingAnimations;
     current.collision.enabled=candidate.collision.enabled;
     current.collision.damageActors=candidate.collision.damageActors;
     current.legRelaxation.enabled=candidate.legRelaxation.enabled;

@@ -33,6 +33,11 @@ struct PoseSettings {
     // wing curls down and in rather than pivoting straight from the root.
     // Zero values reproduce the earlier single-hinge stroke.
     float bottomHold{},foldDegrees{},foldCenter{.5f},featherDegrees{},strokeBendDegrees{},strokeBendCenter{.5f};
+    // Authored shaping of the sampled sequences. Amplitude scales every bone
+    // about its mean power-stroke pose. Depth turns each root further down and
+    // curl turns the joints toward the body; both grow toward the lowest point
+    // of the power stroke and vanish at its highest. Neutral: 1, 0, 0.
+    float authoredAmplitude{1},authoredDepthDegrees{},authoredCurlDegrees{};
     // Per wing pair, in LeftRoots/RightRoots order. Delay follows the actual
     // driven stroke history, so parked and manual strokes remain synchronized.
     static constexpr unsigned maxPairs=8;
@@ -77,6 +82,9 @@ inline bool valid(const PoseSettings& p){
         ||!std::isfinite(p.foldCenter)||p.foldCenter<.1f||p.foldCenter>.9f||!std::isfinite(p.featherDegrees)||std::abs(p.featherDegrees)>90
         ||!std::isfinite(p.strokeBendDegrees)||std::abs(p.strokeBendDegrees)>180
         ||!std::isfinite(p.strokeBendCenter)||p.strokeBendCenter<.1f||p.strokeBendCenter>.9f)return false;
+    if(!std::isfinite(p.authoredAmplitude)||p.authoredAmplitude<0||p.authoredAmplitude>2
+        ||!std::isfinite(p.authoredDepthDegrees)||std::abs(p.authoredDepthDegrees)>60
+        ||!std::isfinite(p.authoredCurlDegrees)||std::abs(p.authoredCurlDegrees)>90)return false;
     for(unsigned i=0;i<PoseSettings::maxPairs;++i){
         const float d=p.pairDelaySeconds[i],s=p.pairScale[i];
         if(!std::isfinite(d)||d<0||d>.5f||!std::isfinite(s)||s<0||s>2)return false;

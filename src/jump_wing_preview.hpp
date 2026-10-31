@@ -33,6 +33,8 @@ public:
         }
         return amount_;
     }
+    bool active()const{return pending_||jumped_||amount_>0;}
+    bool pending()const{return pending_;}
     float amount()const{return amount_;}
 private:bool pending_{},jumped_{},closing_{};float age_{},amount_{},motionAge_{},seed_{},target_{.3f};
     float overOpen_{35},openSeconds_{.22f},settleSeconds_{.43f};

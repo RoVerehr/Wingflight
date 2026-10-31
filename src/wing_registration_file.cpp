@@ -8,6 +8,31 @@
 
 namespace wingflight {
 namespace {
+// Escape INI/list syntax when necessary instead of rejecting model names.
+// Ordinary names stay readable. Escaping the marker itself makes saving lossless.
+constexpr std::string_view nameMarker="@hex:";
+std::string storeName(std::string_view name){
+    if(!name.starts_with(nameMarker)&&name.find_first_of("\r\n,\"")==name.npos&&name.find('\0')==name.npos
+        &&(name.empty()||(name.front()!=' '&&name.front()!='\t'&&name.back()!=' '&&name.back()!='\t')))
+        return std::string(name);
+    constexpr char hex[]="0123456789ABCDEF";
+    std::string out(nameMarker);out.reserve(out.size()+name.size()*2);
+    for(unsigned char c:name){out+=hex[c>>4];out+=hex[c&15];}
+    return out;
+}
+std::string loadName(std::string_view name){
+    if(!name.starts_with(nameMarker))return std::string(name);
+    const auto hex=name.substr(nameMarker.size());
+    if(hex.size()%2)return std::string(name);
+    auto digit=[](char c){return c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:c>='A'&&c<='F'?c-'A'+10:-1;};
+    std::string out;out.reserve(hex.size()/2);
+    for(std::size_t i=0;i<hex.size();i+=2){
+        const auto hi=digit(hex[i]),lo=digit(hex[i+1]);
+        if(hi<0||lo<0)return std::string(name);
+        out+=static_cast<char>((hi<<4)|lo);
+    }
+    return out;
+}
 std::string read(const std::filesystem::path& path,const char* section,const char* key,const char* fallback=""){
     char text[8192]{};const auto size=GetPrivateProfileStringA(section,key,fallback,text,sizeof(text),path.string().c_str());
     if(size>=sizeof(text)-2)throw std::runtime_error("Wing registration value exceeds 8 KiB");
@@ -19,8 +44,7 @@ std::vector<std::string> names(std::string text){
         const auto first=value.find_first_not_of(" \t\r"),last=value.find_last_not_of(" \t\r");
         if(first==value.npos)continue;
         value=value.substr(first,last-first+1);
-        if(!channel::storableWingName(value))throw std::runtime_error("Invalid wing bone name");
-        out.push_back(value);
+        out.push_back(loadName(value));
     }
     if(out.size()>128)throw std::runtime_error("Wing registration list exceeds 128 entries");
     return out;
@@ -59,7 +83,7 @@ template<std::size_t N>std::string pairText(const std::array<float,N>& values,st
 template<class T>std::string join(const std::vector<T>& values){
     std::ostringstream out;bool first=true;
     for(const auto& v:values){if(!first)out<<',';first=false;
-        if constexpr(std::is_same_v<T,std::string>)out<<v;
+        if constexpr(std::is_same_v<T,std::string>)out<<storeName(v);
         else out<<std::uppercase<<std::hex<<std::setw(6)<<std::setfill('0')<<v;}
     return out.str();
 }
@@ -76,30 +100,29 @@ WingProfile readWingRegistration(const std::filesystem::path& file){
     const auto path=std::filesystem::absolute(file);
     if(std::filesystem::file_size(path)>1024*1024)throw std::runtime_error("Wing registration exceeds 1 MiB");
     WingProfile p;p.id=path.stem().string();p.registrationFile=path.string();
-    p.plugin=read(path,"Wings","Plugin");const auto kind=read(path,"Wings","Template");p.wingTemplate=channel::parseTemplate(kind);
+    p.plugin=loadName(read(path,"Wings","Plugin"));const auto kind=read(path,"Wings","Template");p.wingTemplate=channel::parseTemplate(kind);
     if(p.wingTemplate==channel::Template::legacy)throw std::runtime_error("Template must be AWU, Authored, Fairy, VampireLord or Invisible");
-    if(p.plugin.empty()||p.plugin.find_first_of("/\\\r\n=[];")!=p.plugin.npos)throw std::runtime_error("Plugin must be an ESP/ESM/ESL filename");
+    if(p.plugin.empty())throw std::runtime_error("Wing registration requires Plugin");
     p.effectIDs=ids(read(path,"Wings","Effects"));p.armorIDs=ids(read(path,"Wings","Armors"));
     if(p.effectIDs.empty()&&p.armorIDs.empty())throw std::runtime_error("Wing registration requires Effects or Armors");
-    p.continuousFlight=p.wingTemplate==channel::Template::fairy;
+    const auto style=read(path,"Wings","FlightStyle",p.wingTemplate==channel::Template::fairy?"Continuous":"Wingbeats");
+    if(style!="Wingbeats"&&style!="Continuous")throw std::runtime_error("FlightStyle must be Wingbeats or Continuous");
+    p.continuousFlight=style=="Continuous";
     p.animationless=p.wingTemplate==channel::Template::invisible;
     p.continuousRiseSpeed=value(path,"Wings","RiseSpeed",4);
     if(p.continuousRiseSpeed<.1f||p.continuousRiseSpeed>100)throw std::runtime_error("RiseSpeed must be .1..100");
-    p.rootNode=read(path,"Model","RootNode");p.leftRoots=names(read(path,"Model","LeftRoots"));p.rightRoots=names(read(path,"Model","RightRoots"));
+    p.rootNode=loadName(read(path,"Model","RootNode"));p.leftRoots=names(read(path,"Model","LeftRoots"));p.rightRoots=names(read(path,"Model","RightRoots"));
     p.rootNode=channel::stableWingNodeName(p.rootNode);
     for(auto& name:p.leftRoots)name=channel::stableWingNodeName(name);
     for(auto& name:p.rightRoots)name=channel::stableWingNodeName(name);
     if(p.leftRoots.size()!=p.rightRoots.size()||p.leftRoots.size()>8)throw std::runtime_error("LeftRoots and RightRoots must have equal counts, up to 8 pairs");
     auto allRoots=p.leftRoots;allRoots.insert(allRoots.end(),p.rightRoots.begin(),p.rightRoots.end());std::sort(allRoots.begin(),allRoots.end());
     if(std::adjacent_find(allRoots.begin(),allRoots.end())!=allRoots.end())throw std::runtime_error("Wing roots must have distinct names");
-    if(!channel::storableWingName(p.rootNode))throw std::runtime_error("Invalid RootNode name");
     // Authored: the model's own embedded sequences. A missing fast or spread
     // sequence reuses the previous channel's sequence.
-    p.flapSequence=read(path,"Model","PowerSequence","mAnimation4_Loop");
-    p.glideSequence=read(path,"Model","FastSequence","mAnimation4s");
-    p.spreadSequence=read(path,"Model","SpreadSequence","mAnimation1_Loop");
-    for(const auto* name:{&p.flapSequence,&p.glideSequence,&p.spreadSequence})
-        if(!channel::storableWingName(*name))throw std::runtime_error("Invalid authored sequence name");
+    p.flapSequence=loadName(read(path,"Model","PowerSequence","mAnimation4_Loop"));
+    p.glideSequence=loadName(read(path,"Model","FastSequence","mAnimation4s"));
+    p.spreadSequence=loadName(read(path,"Model","SpreadSequence","mAnimation1_Loop"));
     if(p.wingTemplate==channel::Template::authored&&p.flapSequence.empty())throw std::runtime_error("Authored requires a PowerSequence");
     p.wingPose=channel::defaults(p.wingTemplate);auto& q=p.wingPose;
     q.upDegrees=value(path,"Animation","UpDegrees",q.upDegrees);q.downDegrees=value(path,"Animation","DownDegrees",q.downDegrees);
@@ -117,11 +140,14 @@ WingProfile readWingRegistration(const std::filesystem::path& file){
     q.strokeBendDegrees=value(path,"Animation","StrokeBendDegrees",neutral?0:q.strokeBendDegrees);
     // Earlier stroke-bend files shared FoldCenter; keep their appearance.
     q.strokeBendCenter=value(path,"Animation","StrokeBendCenter",neutral?q.foldCenter:q.strokeBendCenter);
+    q.authoredAmplitude=value(path,"Animation","AuthoredAmplitude",q.authoredAmplitude);
+    q.authoredDepthDegrees=value(path,"Animation","AuthoredDepthDegrees",q.authoredDepthDegrees);
+    q.authoredCurlDegrees=value(path,"Animation","AuthoredCurlDegrees",q.authoredCurlDegrees);
     q.pairDelaySeconds.fill(0);q.pairScale.fill(1);
     pairValues(path,"PairDelaySeconds",q.pairDelaySeconds);pairValues(path,"PairScales",q.pairScale);
     channel::setAxisAngles(q,value(path,"Animation","AxisHeadingDegrees",0),value(path,"Animation","AxisTiltDegrees",0));
     if(!channel::valid(q))throw std::runtime_error("Wing animation values are outside their supported ranges; axis must be nonzero");
-    p.soundPlugin=read(path,"Sound","Plugin","Dawnguard.esm");
+    p.soundPlugin=loadName(read(path,"Sound","Plugin","Dawnguard.esm"));
     auto soundID=[&](const char* key,const char* fallback){const auto text=read(path,"Sound",key,fallback);
         if(text=="000000"||text=="0")return 0u;const auto list=ids(text);
         if(list.size()!=1)throw std::runtime_error("Sound IDs must contain one FormID or 000000");return list.front();};
@@ -143,16 +169,16 @@ std::string wingRegistrationText(const WingProfile& p){
     std::ostringstream out;out<<std::fixed<<std::setprecision(4);
     out<<"; Persistent Wingflight registration. Unequipping never deletes this file.\n"
        <<"; Forms are hexadecimal IDs local to Plugin; Effects and Armors are alternative triggers.\n"
-       <<"[Wings]\nPlugin="<<p.plugin<<"\nEffects="<<join(p.effectIDs)<<"\nArmors="<<join(p.armorIDs)
-       <<"\nTemplate="<<channel::templateName(p.wingTemplate)<<"\nRiseSpeed="<<p.continuousRiseSpeed<<"\n\n"
+       <<"[Wings]\nPlugin="<<storeName(p.plugin)<<"\nEffects="<<join(p.effectIDs)<<"\nArmors="<<join(p.armorIDs)
+       <<"\nTemplate="<<channel::templateName(p.wingTemplate)<<"\nFlightStyle="<<(p.continuousFlight?"Continuous":"Wingbeats")<<"\nRiseSpeed="<<p.continuousRiseSpeed<<"\n\n"
        <<"; Only these wing branches are driven. Empty mappings request structural detection.\n"
-       <<"[Model]\nRootNode="<<channel::stableWingNodeName(p.rootNode)<<"\nLeftRoots=";
+       <<"[Model]\nRootNode="<<storeName(channel::stableWingNodeName(p.rootNode))<<"\nLeftRoots=";
     auto stableLeft=p.leftRoots,stableRight=p.rightRoots;
     for(auto& name:stableLeft)name=channel::stableWingNodeName(name);
     for(auto& name:stableRight)name=channel::stableWingNodeName(name);
     out<<join(stableLeft)<<"\nRightRoots="<<join(stableRight)<<'\n';
     if(p.wingTemplate==channel::Template::authored)
-        out<<"PowerSequence="<<p.flapSequence<<"\nFastSequence="<<p.glideSequence<<"\nSpreadSequence="<<p.spreadSequence<<'\n';
+        out<<"PowerSequence="<<storeName(p.flapSequence)<<"\nFastSequence="<<storeName(p.glideSequence)<<"\nSpreadSequence="<<storeName(p.spreadSequence)<<'\n';
     out<<'\n';
     const auto& q=p.wingPose;
     const auto axis=channel::storedAxisAngles(q);
@@ -163,13 +189,15 @@ std::string wingRegistrationText(const WingProfile& p){
        <<"\nJointFactor="<<q.jointFactor<<"\nJointDelaySeconds="<<q.jointDelay<<"\nNativeSwayWeight="<<q.nativeSwayWeight
        <<"\nBlendSeconds="<<q.blendSeconds
        <<"\nBottomHold="<<q.bottomHold<<"\nFoldDegrees="<<q.foldDegrees<<"\nFoldCenter="<<q.foldCenter<<"\nFeatherDegrees="<<q.featherDegrees<<"\nStrokeBendDegrees="<<q.strokeBendDegrees<<"\nStrokeBendCenter="<<q.strokeBendCenter;
+    if(p.wingTemplate==channel::Template::authored)
+        out<<"\nAuthoredAmplitude="<<q.authoredAmplitude<<"\nAuthoredDepthDegrees="<<q.authoredDepthDegrees<<"\nAuthoredCurlDegrees="<<q.authoredCurlDegrees;
     // One entry per configured pair, and never drop a value that was changed.
     auto pairs=std::max<std::size_t>(p.leftRoots.size(),1);
     for(std::size_t i=0;i<q.pairScale.size();++i)if(q.pairDelaySeconds[i]!=0||q.pairScale[i]!=1)pairs=std::max(pairs,i+1);
     out<<"\nPairDelaySeconds="<<pairText(q.pairDelaySeconds,pairs)<<"\nPairScales="<<pairText(q.pairScale,pairs)
        <<"\nAxisHeadingDegrees="<<axis[0]<<"\nAxisTiltDegrees="<<axis[1]<<'\n';
     out<<"\n[Timing]\nDownstrokeEnd="<<p.timing.downstrokeEnd<<"\n\n"
-       <<"[Sound]\nPlugin="<<p.soundPlugin<<"\nPowerStroke=";
+       <<"[Sound]\nPlugin="<<storeName(p.soundPlugin)<<"\nPowerStroke=";
     out<<std::uppercase<<std::hex<<std::setw(6)<<std::setfill('0')<<p.flapSoundID<<"\nFastFlap="<<std::setw(6)<<p.fastSoundID
        <<"\nSpreadFlutter="<<std::setw(6)<<p.spreadSoundID<<std::dec<<"\nMarkerPhase="<<p.flapSoundPhase<<"\nFastMarkerPhase="<<p.fastSoundPhase
        <<"\nSpreadMarkerPhase1="<<p.spreadSoundPhase1<<"\nSpreadMarkerPhase2="<<p.spreadSoundPhase2<<"\nSpreadVolume="<<p.spreadSoundVolume<<"\n";

@@ -38,6 +38,7 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
         if (std::floor(value) != value) { throw std::runtime_error(fmt::format("Non-integer setting: {}/{} value={}",section,key,value)); }
         return static_cast<unsigned>(value);
     };
+    cfg.controlJumpWingAnimations=integer("Jump","ControlWingAnimations",1,1)!=0;
     cfg.enabled = integer("General", "Enabled", 1, 1) != 0;
     cfg.actors.enabled=integer("NPCFlight","Enabled",1,1)!=0;
     cfg.actors.airCombat=integer("NPCFlight","AirCombat",1,1)!=0;
@@ -66,6 +67,7 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
     cfg.armedFlightIdle=integer("Compatibility","ArmedFlightIdle",1,1)!=0;
     cfg.disableSprintWhenArmed=integer("Flight","DisableSprintWhenArmed",0,1)!=0;
     cfg.tuning.endFlightOnGround=integer("Flight","EndFlightOnGround",1,1)!=0;
+    cfg.tuning.groundWingIdle=integer("Flight","GroundWingIdle",0,1)!=0;
     cfg.poseWhenArmed = integer("Compatibility", "PoseWhenWeaponsDrawn", 1, 1) != 0;
     cfg.modeKey = integer("Keyboard", "CycleMode", 37, 255);
     cfg.landKey = integer("Keyboard", "Land", 46, 255);
@@ -107,6 +109,10 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
     cfg.glideHoldSeconds=number(file,"Glide","HoldSeconds",0.25f,0.1f,1);
 
     cfg.deadzone = number(file, "Gamepad", "Deadzone", 0.2f, 0.05f, 0.8f);
+    // The ground-only target is now shared by full-flight descent. Preserve a
+    // tuned main-INI value; the canonical rewrite emits only the new key.
+    if(read(file,"Flight","DescentSpeed","").empty()&&!read(file,"Flight","GroundDescentSpeed","").empty())
+        cfg.tuning.descentSpeed=number(file,"Flight","GroundDescentSpeed",3.f,.5f,8.f);
     // Startup reads and live menu edits share exactly the same ranges/defaults.
     for(const auto& setting:liveFloatSettings)
         setting.value(cfg)=number(file,setting.section,setting.key,setting.value(cfg),setting.minimum,setting.maximum);
@@ -139,7 +145,6 @@ Configuration loadConfiguration(const std::filesystem::path& source) {
         const auto driver=read(path,"Wings","AnimationDriver","Runtime");
         if(driver!="Runtime"&&driver!="None")throw std::runtime_error(fmt::format("Unknown wing animation driver: file={} value='{}' expected=Runtime/None",path.string(),driver));
         profile.animationless=driver=="None";
-        if(profile.animationless&&profile.continuousFlight)throw std::runtime_error(fmt::format("Continuous wings retain their provider loop; AnimationDriver=None is for ordinary invisible wingbeats: {}",path.string()));
         std::istringstream ids(read(path, "Wings", "Effects", ""));
         std::string item;
         while (std::getline(ids, item, ',')) {

@@ -25,6 +25,8 @@ void clearContinuousBinding(){
 }
 }
 void Wings::prepareContinuousAnimation(WingMatch match,bool active,bool highSpeed,float fastMultiplier,float dt){
+    // Model-less continuous flight must not inspect or animate unrelated effect ART.
+    if(match.profile&&match.profile->animationless){clearContinuousBinding();return;}
     if(registeredWing(match.profile)){
         if(match.profile->continuousFlight&&active&&registered_.prepare(match).found){registered_.blend(0,1,0);registered_.loopRate(highSpeed?fastMultiplier:1.f,1);}
         return;

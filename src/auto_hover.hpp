@@ -14,9 +14,16 @@ public:
         height_=height;
         if(followManual_)base_=std::max(base_,height);
     }
-    void manualClimb(){followManual_=true;}
+    void manualClimb(){followManual_=true;ground_=false;}
     void automaticDownstroke(){followManual_=false;}
     void descend(float height){base_=height;followManual_=false;}
+    // A retained floor sets a low reference. Its automatic beats only reach
+    // that height: the floor has absorbed the fall an airborne beat cancels.
+    void settle(float base){base_=base;known_=true;followManual_=false;ground_=true;}
+    bool grounded() const{return ground_;}
+    float riseCeiling(float gravity) const{
+        return std::sqrt(2.0f*std::max(0.0f,gravity)*std::max(0.0f,base_-height_));
+    }
     float base() const{return base_;}
     float offset() const{return height_-base_;}
     // Forecast the SAME altitude request rule without changing the reference or
@@ -62,7 +69,7 @@ public:
         return bottom<=base_;
     }
 private:
-    bool known_{},followManual_{};
+    bool known_{},followManual_{},ground_{};
     float base_{},height_{};
 };
 }

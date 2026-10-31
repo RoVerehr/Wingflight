@@ -21,6 +21,9 @@ struct WingMotionFrame {
     float automaticRecoverySeconds{-1};
     bool highSpeed{};
     float highSpeedFlapHoldSeconds{0.5f};
+    // Optional visual-only end of a manual downswing, separate from lift.
+    // Zero retains the existing scheduler (NPCs and other callers).
+    float manualFinishPhase{};
 };
 
 struct HoverTiming {
@@ -49,6 +52,13 @@ public:
             credits_.pop_front();pending_=static_cast<unsigned>(credits_.size());stroke_=Stroke::recovery;
         }
         if(enabled)wantFlap_=true;
+    }
+    // Keep the displayed beat continuous on touchdown, but retire its lift/cost.
+    // Manual strokes remain physical, including ones accepted before touchdown.
+    void groundIdle(){
+        for(auto& beat:credits_)if(beat.kind==Credit::automatic){beat.kind=Credit::visual;beat.cost=0;beat.paid=true;}
+        automaticLiftFraction_=0;automaticLiftStartsStroke_=false;
+        if(charge_.kind==Credit::automatic)charge_={};
     }
     void setDescentGlide(bool enabled){
         if(enabled==descentGliding_)return;
@@ -96,6 +106,8 @@ public:
     }
     bool wantsFlap() const { return wantFlap_; }
     float rate() const { return rate_; }
+    bool hasManualStroke() const { return hasManual()||manualFinish_; }
+    float groundIdleRateMultiplier(float speedPercent) const { return hasManualStroke()?1.f:speedPercent*.01f; }
     float liftFraction() const { return liftFraction_; }
     bool liftStartsStroke() const { return liftStartsStroke_; }
     float automaticLiftFraction() const { return automaticLiftFraction_; }
@@ -150,6 +162,7 @@ public:
         sincePulse_=std::min(sincePulse_+dt,10.0f);
         setHover(continuous);
         if (!frame.flapActive) {
+            manualFinish_=false;
             wasActive_=false; lastPhase_=-1; entryTime_=0;
             if (pending_) { wantFlap_=true; stroke_=Stroke::waiting; rate_=0.01f; }
             return;
@@ -161,6 +174,11 @@ public:
         const float previousPhase=lastPhase_;
         const bool wrapped=lastPhase_>=0 && frame.phase+0.01f<lastPhase_;
         lastPhase_=frame.phase;
+        const bool finishEnabled=std::isfinite(frame.manualFinishPhase)
+            &&frame.manualFinishPhase>t.downstrokeEnd&&frame.manualFinishPhase<1
+            &&!frame.highSpeed&&!descentGliding_;
+        const bool finishEnded=manualFinish_&&(!finishEnabled||wrapped||frame.phase>=frame.manualFinishPhase);
+        if(finishEnded)manualFinish_=false;
         // Blend from the current pose to the raised-wing start pose BEFORE
         // accelerating the downstroke. A held sequence still blends its weight.
         const auto priorStroke=stroke_;
@@ -181,13 +199,20 @@ public:
         }
         if (stroke_==Stroke::opening && wrapped) { stroke_=Stroke::down; }
         if (wasDown && (frame.phase>=t.downstrokeEnd || wrapped)) {
+            // Retire the physical credit now. The original clip can still be
+            // lowering its outer bones: finish that motion at the final power
+            // rate, without extending lift, billing or replaying the stroke.
+            if(pending_&&credits_.front().kind==Credit::manual&&finishEnabled&&!wrapped&&frame.phase<frame.manualFinishPhase){
+                manualFinish_=true;
+                manualFinishRate_=frame.duration*t.downstrokeEnd/activeDownstrokeSeconds_*(1.045f*.65f);
+            }
             if (pending_) { --pending_;credits_.pop_front(); }
             if(hovering_ && !pending_)urgency_=0;
             stroke_=Stroke::recovery; normalTime_=0;
             // Multiple presses buy multiple power strokes without ever rewinding.
             if (pending_) { stroke_=Stroke::opening; }
         }
-        if (stroke_==Stroke::opening && priorStroke!=Stroke::opening) {
+        if (stroke_==Stroke::opening && (priorStroke!=Stroke::opening||finishEnded)) {
             openingSpan_=std::max(0.01f,1.0f-frame.phase);
         }
         // Latch each power stroke's timing. An extra press during its descent
@@ -231,6 +256,7 @@ public:
             if (descentGliding_ || (!continuous && normalTime_>=recoveryHold)) { wantFlap_=false; }
             if(descentGliding_)rate_=0; // fade to flutter; never start an unrequested loop
         }
+        if(manualFinish_){wantFlap_=true;rate_=manualFinishRate_;}
     }
 private:
     struct Beat {Credit kind;float cost;bool paid;std::uint64_t token;};
@@ -247,6 +273,8 @@ private:
     float lastPhase_{-1}, entryTime_{}, normalTime_{}, descentTime_{}, rate_{0.01f};
     float sincePulse_{10},urgency_{};
     float openingSpan_{1},activeDownstrokeSeconds_{0.34f};
+    bool manualFinish_{};
+    float manualFinishRate_{};
 };
 
 inline bool canParkFlap(float graphWeight, float sequenceWeight, bool flapActive, bool glideActive) {

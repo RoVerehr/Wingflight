@@ -182,7 +182,7 @@ struct GeneratorUpdate {
             std::lock_guard guard(registryMutex);auto it=characters.find(context.character);
             if(it!=characters.end())s=it->second.lock();
         }
-        bool owned=false;if(s){std::lock_guard lock(s->mutex);owned=!s->cancelled&&(s->displayed.original<0.999999f||s->desired.original<0.999999f);}
+        bool owned=false;if(s){std::lock_guard lock(s->mutex);owned=!s->cancelled&&!s->previewing&&(s->displayed.original<0.999999f||s->desired.original<0.999999f);}
         if(!owned||!context.behavior||!context.behavior->data||!context.behavior->data->stringData){
             if(owned)diagnostic::report("wing-audio.behavior-data-missing","use native generator update",generator);
             original(generator,context,delta);return;}

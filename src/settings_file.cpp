@@ -60,6 +60,9 @@ std::string migrateSettingsText(std::string_view original) {
     const auto legacy=std::make_pair(std::string("body"),std::string("forwardlean"));
     const auto renamed=std::make_pair(std::string("body"),std::string("unarmedflightposes"));
     if(!old.contains(renamed)&&old.contains(legacy))old[renamed]=old.at(legacy);
+    const auto groundDescent=std::make_pair(std::string("flight"),std::string("grounddescentspeed"));
+    const auto descent=std::make_pair(std::string("flight"),std::string("descentspeed"));
+    if(!old.contains(descent)&&old.contains(groundDescent))old[descent]=old.at(groundDescent);
     std::string output,section,line;std::istringstream lines{std::string(settingsTemplate)};
     while(std::getline(lines,line)){
         if(!line.empty()&&line.back()=='\r')line.pop_back();
@@ -133,7 +136,7 @@ Configuration loadAndMigrateConfiguration() {
         if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
             throw std::system_error(GetLastError(),std::system_category(),"Cannot replace Wingflight.ini; original retained");
         WritePrivateProfileStringW(nullptr,nullptr,nullptr,path.c_str());
-        SKSE::log::info("Wingflight.ini migrated to schema 0.4.0-6: recognized values preserved, obsolete keys removed, current comments installed; backup={}",backup.empty()?"none (new INI)":backup.string());
+        SKSE::log::info("Wingflight.ini migrated to schema 0.4.2-13: recognized values preserved, obsolete keys removed, current comments installed; backup={}",backup.empty()?"none (new INI)":backup.string());
         return configuration;
     }catch(...){DeleteFileW(temporary.c_str());throw;}
 }
@@ -145,9 +148,11 @@ std::string updateLiveSettingsText(std::string_view original, Configuration sett
         values[normalized(setting.section)][normalized(setting.key)]=numberText(setting.value(settings));
     values["flight"]["disablesprintwhenarmed"]=settings.disableSprintWhenArmed?"1":"0";
     values["flight"]["endflightonground"]=settings.tuning.endFlightOnGround?"1":"0";
+    values["flight"]["groundwingidle"]=settings.tuning.groundWingIdle?"1":"0";
     values["npcflight"]["enabled"]=settings.actors.enabled?"1":"0";
     values["npcflight"]["aircombat"]=settings.actors.airCombat?"1":"0";
     values["general"]["detailedlogging"]=settings.logSamples?"1":"0";
+    values["jump"]["controlwinganimations"]=settings.controlJumpWingAnimations?"1":"0";
     values["collision"]["enabled"]=settings.collision.enabled?"1":"0";
     values["collision"]["damageactors"]=settings.collision.damageActors?"1":"0";
     values["lowerbody"]["relaxedarmedlegs"]=settings.legRelaxation.enabled?"1":"0";

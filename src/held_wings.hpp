@@ -5,5 +5,6 @@ inline bool heldWingsEligible(const WingProfile* p){return p&&p->awuCompatibilit
 void installHeldWingEvents();
 bool heldWingGateInstalled();
 void resetHeldWings();
-void updateHeldWings(WingMatch match,float dt,bool held,bool airborne,bool fullFlight,bool glide,bool suspended,float threshold);
+void landHeldWings(float dt);
+void updateHeldWings(WingMatch match,float dt,bool held,bool airborne,bool fullFlight,bool glide,bool suspended,float threshold,bool enabled,bool jumpPending=false);
 }
