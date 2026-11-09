@@ -1,9 +1,14 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <span>
 
 namespace wingflight::runtime {
+// FSMP MainHooks frame-sync call: SE, AE before 1.7.99, and newer AE.
+inline constexpr std::ptrdiff_t smpFrameSyncOffset(bool se,bool modernAE){
+    return se?0x56d:modernAE?0x9ee:0x9dc;
+}
 struct SceneCall {
     unsigned size{};
     std::uintptr_t target{};

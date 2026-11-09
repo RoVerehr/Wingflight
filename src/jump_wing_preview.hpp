@@ -8,7 +8,7 @@ inline float previewFlutterAmplitude(bool preview,float jumpAmplitude,float glid
 class JumpWingPreview {
 public:
     void reset(){*this={};}
-    void arm(){pending_=true;age_=0;}
+    void arm(){pending_=true;soundPending_=false;age_=0;}
     float update(float dt,bool airborne,bool eligible,float percent=30,float overOpen=35,float openSeconds=.22f,float settleSeconds=.43f){
         if(!std::isfinite(dt)||dt<=0||!std::isfinite(percent)||!std::isfinite(overOpen)||!std::isfinite(openSeconds)||!std::isfinite(settleSeconds)
             ||openSeconds<=0||settleSeconds<=0)return amount_;
@@ -17,9 +17,9 @@ public:
         overOpen=std::clamp(overOpen,0.f,100.f);
         const bool changed=target!=target_||overOpen!=overOpen_||openSeconds!=openSeconds_||settleSeconds!=settleSeconds_;
         target_=target;overOpen_=overOpen;openSeconds_=openSeconds;settleSeconds_=settleSeconds;
-        if(!eligible){pending_=jumped_=false;}
-        else if(pending_){age_+=dt;if(airborne){jumped_=true;pending_=false;motionAge_=0;seed_=amount_;closing_=false;}else if(age_>.6f)pending_=false;}
-        if(!airborne)jumped_=false;
+        if(!eligible){pending_=jumped_=soundPending_=false;}
+        else if(pending_){age_+=dt;if(airborne){jumped_=true;soundPending_=true;pending_=false;motionAge_=0;seed_=amount_;closing_=false;}else if(age_>.6f)pending_=false;}
+        if(!airborne)jumped_=soundPending_=false;
         if(eligible&&jumped_){
             if(changed){motionAge_=0;seed_=amount_;closing_=false;}
             const float peak=overOpen_/100;
@@ -33,10 +33,12 @@ public:
         }
         return amount_;
     }
+    // Consume only after the visual driver accepts a visible jump opening.
+    bool takeOpeningSound(){if(!soundPending_||!jumped_||amount_<=0)return false;soundPending_=false;return true;}
     bool active()const{return pending_||jumped_||amount_>0;}
     bool pending()const{return pending_;}
     float amount()const{return amount_;}
-private:bool pending_{},jumped_{},closing_{};float age_{},amount_{},motionAge_{},seed_{},target_{.3f};
+private:bool pending_{},jumped_{},closing_{},soundPending_{};float age_{},amount_{},motionAge_{},seed_{},target_{.3f};
     float overOpen_{35},openSeconds_{.22f},settleSeconds_{.43f};
 };
 }

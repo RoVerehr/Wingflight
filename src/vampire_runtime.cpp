@@ -6,6 +6,7 @@
 #include "vampire_geometry.hpp"
 #include "vampire_resource.hpp"
 #include "wing_runtime_policy.hpp"
+#include "wing_appearance.hpp"
 #include "armed_bank.hpp"
 #include "wings.hpp"
 #include "runtime_support.hpp"
@@ -257,6 +258,12 @@ void refreshVampireContext(RE::PlayerCharacter* a){
     const auto old=context.exchange(next);
     if(old!=next&&(old||next))SKSE::log::debug("Vampire Lord context: race={:08X} body={} skeletalWingsVisible={}; eligibility follows actual transformation/equipment",next>>8,next&2?"VampireLord":next&1?"Character":"none",bool(next&4));
 }
+bool nativeVampireAppearanceEligible(const RE::Actor* a){
+    if(!a||a!=RE::PlayerCharacter::GetSingleton()||!isNativeVampireLord(a)||!(context.load()&4))return false;
+    const auto body=a->Get3D(false);if(!body)return false;
+    for(const auto name:vampire::wingNames)if(!body->GetObjectByName(name))return false;
+    return true;
+}
 bool nativeVampireFlightEligible(const RE::Actor* a,bool ownedFlight){
     if(a&&a!=RE::PlayerCharacter::GetSingleton()){
         const auto info=inspectVampireActor(a);
@@ -280,7 +287,7 @@ bool nativeVampireFlightEligible(const RE::Actor* a,bool ownedFlight){
 }
 namespace {VampireWingRuntime playerWings;}
 VampireWingRuntime::~VampireWingRuntime(){release(false);}
-WingPlayback VampireWingRuntime::prepare(RE::Actor* actor){if(!state_)state_=std::make_shared<VampireWingState>();return state_->prepare(actor);}
+WingPlayback VampireWingRuntime::prepare(RE::Actor* actor){WingAppearancePass appearance(actor?actor->Get3D(false):nullptr);if(!state_)state_=std::make_shared<VampireWingState>();return state_->prepare(actor);}
 void VampireWingRuntime::advance(float dt){if(state_)state_->advance(dt);}
 bool VampireWingRuntime::blend(float flap,float ownership,float fast){return state_&&state_->blend(flap,ownership,fast);}
 void VampireWingRuntime::rate(float value){if(state_)state_->rate(value);}

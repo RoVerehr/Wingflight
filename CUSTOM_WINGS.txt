@@ -85,7 +85,9 @@ When you save over an existing rule, the previous version is kept as .bak
                sprinting. It only selects a wing motion; it does not change
                the character's race or body animations.
   Fairy        Continuous fast flapping, also while descending. Hold Jump to
-               climb; sprinting speeds up the flapping. No Jump wingbeat boost.
+               climb and Descend to sink at Flight/DescentSpeed; outside-flight
+               held-Jump glide uses Flight/GlideFallSpeed. Sprinting speeds up
+               the flapping. No Jump wingbeat boost.
   Invisible    No visible wings or bone animation. Defaults to wingbeat flight
                and sounds. Add FlightStyle=Continuous for steady levitation
                without wingbeats or wingbeat sounds. INI only; the scanner
@@ -195,6 +197,8 @@ data of its own.
 Everything here is in the [Animation] section and has a matching slider on
 the Custom Wings page. Angles are in degrees, relative to the model's pose
 when the wings are bound. Values outside the listed ranges are rejected.
+Invalid preset files are logged and skipped; other presets and the DLL
+continue loading. The original preset file is retained for correction.
 
 These are the AWU template defaults; other templates use different ones:
 
@@ -357,11 +361,12 @@ Edited an INI while the game is running? Land and leave flight, then click
 Reload Registration INIs. Select the rule again under Saved registrations
 before using the panel, so the panel does not save an older draft over your
 edits. Restarting
-the game reloads them as well. These files are separate from Wingflight.ini.
+the game reloads them as well. These files are separate from the main player settings.
 
 If wings do not animate, a model is missing from the scan, or Authored falls
 back to the procedural wingbeat, check Wingflight.log. Turn on Detailed
-Logging in the control panel (or [General] DetailedLogging=1 in Wingflight.ini)
+Logging in the control panel (or [General] DetailedLogging=1 in
+Data/SKSE/Plugins/Wingflight/Settings.ini, then restart)
 for more detail. Warnings and errors are always logged.
 
 The wings are rebound automatically when equipment changes; no rescan is

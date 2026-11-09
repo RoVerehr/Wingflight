@@ -6,7 +6,7 @@ struct MotionVector {float x{},y{},z{};};
 struct LegMotionInput {MotionVector velocity;float gravity{4};};
 struct LegRelaxation {
     bool enabled{true},secondaryMotion{true};
-    float thighAnimationWeight{0.35f},maxSwingDegrees{10},stiffness{18},damping{6},inertia{1};
+    float thighAnimationWeight{0.4f},maxSwingDegrees{30},stiffness{3},damping{5},inertia{2};
 };
 class LegRelaxationBlend {
 public:

@@ -1,4 +1,5 @@
 #include "registered_wings.hpp"
+#include "wing_appearance.hpp"
 #include "actor_state.hpp"
 #include "wing_registration_file.hpp"
 #include "wing_channel_pose.hpp"
@@ -10,6 +11,8 @@
 #include "armed_bank.hpp"
 #include "vampire_runtime.hpp"
 #include "runtime_callable.hpp"
+#include "runtime_support.hpp"
+#include "body_callsite.hpp"
 #include "diagnostics.hpp"
 #include "wing_runtime_policy.hpp"
 #include <SKSE/SKSE.h>
@@ -157,7 +160,7 @@ Rig inspect(RE::Actor* actor,Object* model,const WingProfile& profile){
         if(!root->name.c_str()||root->name.empty()){out.reason="Wing root has no stable name";return out;}
         auto& sideNames=side>0?out.left:out.right;const auto pair=static_cast<unsigned>(sideNames.size());
         sideNames.emplace_back(channel::stableWingNodeName(root->name.c_str()));
-        const auto branchStart=out.bones.size();unsigned branchBudget=256;
+        const auto branchStart=out.bones.size();unsigned branchBudget=1024;
         walk(root,[&](Object* node){
             if(bodyBone(node)||!node->AsNode()||!added.insert(node).second)return;
             bool used=weighted.contains(node);if(!used)for(auto bone:weighted)if(inside(bone,node)){used=true;break;}
@@ -165,7 +168,10 @@ Rig inspect(RE::Actor* actor,Object* model,const WingProfile& profile){
             unsigned depth{};for(auto p=node;p&&p!=root;p=p->parent)++depth;
             out.bones.push_back({RE::NiPointer<Object>(node),side,depth,0,0,std::nullopt,pair});
         },branchBudget);
-        if(!branchBudget||out.bones.size()>128){out.reason="Wing rig exceeds 128 controlled bones";return out;}
+        if(!branchBudget){out.reason="Wing branch exceeds the 1024-node scan budget";return out;}
+        // Feather rigs can contain hundreds of weighted joints. Runtime bones
+        // and skin mappings use dynamic containers; keep a bounded total.
+        if(out.bones.size()>512){out.reason="Wing rig exceeds 512 controlled bones";return out;}
         // Normalize by cumulative segment length within each wing, so shorter
         // chains and six-wing meshes do not require a provider-specific map.
         std::unordered_map<Object*,float> positions;float longest{};unsigned deepest{};
@@ -336,13 +342,61 @@ void rotation(RE::NiMatrix3& m,legs::Quaternion q){const auto a=legs::matrix(q);
 using SceneMap=std::unordered_map<Object*,std::vector<std::weak_ptr<RegisteredWingRuntime::State>>>;
 std::mutex sceneMutex;
 std::atomic<std::shared_ptr<const SceneMap>> scenes;
+using SMPStates=std::vector<std::weak_ptr<RegisteredWingRuntime::State>>;
+std::atomic<std::shared_ptr<const SMPStates>> smpStates;
+struct SMPFrameSync {
+    static void thunk(void* platform);
+    static inline void (*original)(void*);
+};
+SKSE::Trampoline smpTrampoline;
+bool installSMPFrameSync(){
+    static bool attempted{},installed{};
+    if(attempted)return installed;
+    attempted=true;
+    const auto module=GetModuleHandleW(L"hdtSMP64.dll");
+    if(!module)return false;
+    const bool se=runtimeBackend()==runtime::Backend::steam1597;
+    const auto offset=runtime::smpFrameSyncOffset(se,REL::Module::get().version()>=REL::Version(1,7,99,0));
+    const auto site=REL::RelocationID(35565,36564).address()+offset;
+    if(!runtimeReadable(reinterpret_cast<void*>(site),6))return false;
+    const auto call=runtime::inspectSceneCall(site,{reinterpret_cast<const std::uint8_t*>(site),6});
+    if(!call.size)return false;
+    auto destination=call.target;
+    if(call.indirect){
+        if(!runtimeReadable(reinterpret_cast<void*>(destination),8))return false;
+        std::memcpy(&destination,reinterpret_cast<void*>(destination),8);
+    }
+    auto target=destination;bool verified{};
+    for(unsigned hop=0;hop<8;++hop){
+        if(!runtime::executableMemory(target)||!runtimeReadable(reinterpret_cast<void*>(target),6))break;
+        MEMORY_BASIC_INFORMATION info{};
+        if(VirtualQuery(reinterpret_cast<void*>(target),&info,sizeof(info))&&info.AllocationBase==module){verified=true;break;}
+        const auto code=reinterpret_cast<const std::uint8_t*>(target);
+        std::int32_t displacement{};
+        if(code[0]==0xe9){std::memcpy(&displacement,code+1,4);target=target+5+displacement;}
+        else if(code[0]==0xff&&code[1]==0x25){
+            std::memcpy(&displacement,code+2,4);const auto slot=target+6+displacement;
+            if(!runtimeReadable(reinterpret_cast<void*>(slot),8))break;
+            std::memcpy(&target,reinterpret_cast<void*>(slot),8);
+        }else break;
+    }
+    if(!verified){SKSE::log::warn("SMP wing final pass unavailable: frame-sync chain does not resolve to FSMP; existing wing updates retained");return false;}
+    SMPFrameSync::original=reinterpret_cast<decltype(SMPFrameSync::original)>(destination);
+    smpTrampoline.create(14);
+    if(call.size==5)smpTrampoline.write_call<5>(site,SMPFrameSync::thunk);
+    else smpTrampoline.write_call<6>(site,SMPFrameSync::thunk);
+    installed=true;
+    SKSE::log::info("SMP wing final pass revision=smp-final-pose-2 installed: site={:X} chainedTarget={:X}; runtime-renamed registered wings only",site,destination);
+    return true;
+}
 struct ControllerOwner {std::weak_ptr<RegisteredWingRuntime::State> state;unsigned bone{};};
 using ControllerMap=std::unordered_map<RE::NiTimeController*,ControllerOwner>;
 std::atomic<std::shared_ptr<const ControllerMap>> wingControllers;
 struct TransformUpdate {
-    static void thunk(RE::NiTimeController* controller,float time);
+    static void thunk(RE::NiTimeController* controller,RE::NiUpdateData* data);
     static inline REL::Relocation<decltype(thunk)> original;
 };
+static_assert(std::is_same_v<decltype(&TransformUpdate::thunk),void (*)(RE::NiTimeController*,RE::NiUpdateData*)>);
 bool transformHookInstalled{};
 bool installTransformHook(){
     if(transformHookInstalled)return true;
@@ -350,18 +404,38 @@ bool installTransformHook(){
     const auto previous=*reinterpret_cast<const std::uintptr_t*>(table.address()+0x27*sizeof(void*));
     if(!runtime::executableMemory(previous)||previous==reinterpret_cast<std::uintptr_t>(&TransformUpdate::thunk)){
         diagnostic::report("registration.transform-callback-unavailable","cannot retain procedural pose after model controllers",nullptr,fmt::format("target={:X}",previous));return false;}
-    // NiTimeController::Update(float), inherited by NiTransformController.
+    // The runtime slot consumes NiUpdateData* in RDX, despite the float
+    // declaration in this CommonLib snapshot. Preserve the pointer across all
+    // bookkeeping calls; XMM1 is not the second argument of this engine entry.
     // Only controllers belonging to registered wing bones receive a post-write.
     TransformUpdate::original=table.write_vfunc(0x27,TransformUpdate::thunk);transformHookInstalled=true;
     SKSE::log::info("Registered wing transform callback installed: chainedTarget={:X}; explicit owned wing controllers only",previous);return true;
 }
 }
 
+WingAppearanceRoots registeredWingAppearanceRoots(const WingMatch& match){
+    WingAppearanceRoots out;
+    if(!match.owner||!match.model||!registeredWing(match.profile))return out;
+    std::lock_guard lock(registryMutex);
+    const auto& rig=cachedRig(match.owner,match.model,*match.profile);if(!rig)return out;
+    out.model=rig.model;
+    for(const auto& b:rig.bones){
+        if(b.depth==0)out.roots.push_back(b.node);
+        if(b.node->name.c_str()&&channel::stableWingNodeName(b.node->name.c_str())!=b.node->name.c_str())out.smp=true;
+    }
+    return out;
+}
 void loadWingRegistrations(){
     SKSE::log::info("Wing registration channel revision=template-channel-10: attachment-local wing axes; static bind calibration; camera-independent wing articulation");
-    const auto folder=directory();if(!std::filesystem::is_directory(folder))return;
+    const auto folder=directory();std::error_code error;
+    if(!std::filesystem::is_directory(folder,error)){
+        if(error&&error!=std::errc::no_such_file_or_directory)SKSE::log::error("Wing registration directory ignored: path={} reason={}; existing registrations retained",folder.string(),error.message());
+        return;
+    }
+    std::vector<std::filesystem::path> paths;
+    for(std::filesystem::directory_iterator it(folder,error),end;it!=end&&!error;it.increment(error))if(it->path().extension()==".ini")paths.push_back(it->path());
+    if(error){SKSE::log::error("Wing registration directory ignored: path={} reason={}; existing registrations retained",folder.string(),error.message());return;}
     {std::lock_guard lock(registryMutex);retiredProfiles.insert(retiredProfiles.end(),registrations.begin(),registrations.end());registrations.clear();rigCache.clear();resolvedForms.clear();}
-    std::vector<std::filesystem::path> paths;for(const auto& entry:std::filesystem::directory_iterator(folder))if(entry.path().extension()==".ini")paths.push_back(entry.path());
     std::sort(paths.begin(),paths.end());
     for(const auto& path:paths){
         char kind[64]{};GetPrivateProfileStringA("Wings","Template","",kind,sizeof(kind),path.string().c_str());if(!kind[0])continue;
@@ -372,6 +446,20 @@ void loadWingRegistrations(){
             SKSE::log::info("Wing registration loaded: file={} plugin={} effects={} armors={} template={}; model bindings are transient, INI rules persist",path.filename().string(),p->plugin,p->effectIDs.size(),p->armorIDs.size(),kind);
         }catch(const std::exception& e){SKSE::log::error("Wing registration rejected: file={} reason={}; other registrations retained",path.string(),e.what());}
     }
+}
+bool hasRegisteredWingSource(RE::Actor* actor){
+    if(!actor||!actor->Is3DLoaded())return false;
+    std::lock_guard lock(registryMutex);
+    const auto current=sources(actor);
+    for(const auto& p:registrations){
+        for(const auto& source:current)if(sourceMatches(*p,source))return true;
+        // A worn source counts before the biped clone becomes available.
+        for(const auto id:p->armorIDs){
+            const auto armor=RE::TESDataHandler::GetSingleton()->LookupForm<RE::TESObjectARMO>(id,p->plugin);
+            if(armor&&actor->GetWornArmor(armor->GetFormID(),true))return true;
+        }
+    }
+    return false;
 }
 WingMatch findRegisteredWings(RE::Actor* actor){
     if(!actor||!actor->Is3DLoaded()||actor->IsDead()||knockedDown(actor))return {};
@@ -384,8 +472,8 @@ WingMatch findRegisteredWings(RE::Actor* actor){
         if(form&&std::none_of(current.begin(),current.end(),[&](const auto& s){return s.form==form;})&&actor->GetWornArmor(form->GetFormID(),true))current.push_back({form,nullptr,{},true});
     }
     for(const auto& p:registrations)for(const auto& source:current)if(sourceMatches(*p,source)){
-        if(p->wingTemplate==channel::Template::invisible)return {p.get(),source.effect,actor,nullptr};
-        if(source.model&&cachedRig(actor,source.model.get(),*p))return {p.get(),source.effect,actor,source.model.get()};
+        if(p->wingTemplate==channel::Template::invisible)return {p.get(),source.effect,actor,nullptr,source.form};
+        if(source.model&&cachedRig(actor,source.model.get(),*p))return {p.get(),source.effect,actor,source.model.get(),source.form};
     }
     return {};
 }
@@ -459,6 +547,8 @@ struct RegisteredWingRuntime::State : std::enable_shared_from_this<State> {
     float dt{},clock{},ownership{},targetOwnership{},pitch{},fastRate{1},editBlend{1};bool released{};
     // Authored: sequence timing and the model file that owns the source keys.
     bool authored{};std::array<float,3> clipBegin{},clipDuration{};RE::NiPointer<RE::NiNode> clipFile;
+    bool smpFinalPass{};
+    unsigned smpSamples{};
     unsigned bindAuthored(AuthoredClips clips){
         const auto table=REL::Relocation<std::uintptr_t>(RE::VTABLE_NiTransformInterpolator[0]).address();
         std::unordered_map<RE::NiInterpolator*,RE::NiPointer<RE::NiInterpolator>> copies;unsigned bound{},foreign{};
@@ -564,6 +654,45 @@ struct RegisteredWingRuntime::State : std::enable_shared_from_this<State> {
     }
     std::uint64_t tick{},applied{};
     bool current(){const auto a=actor.get();return a&&a->Is3DLoaded()&&a->Get3D(false)==body.get()&&!a->IsDead()&&!knockedDown(a);}
+    void finishSMPFrame(){
+        std::lock_guard lock(mutex);
+        if(!smpFinalPass||released||!profile||ownership<=.0001f||!visual::finalPoseFresh(tick,applied)||!current())return;
+        // All roots must still belong to this loaded rig before any writes.
+        std::array<Object*,channel::PoseSettings::maxPairs*2> roots{};unsigned rootCount{};
+        for(const auto& b:bones)if(!b.rig.depth){
+            if(!inside(b.rig.node.get(),body.get())&&!inside(b.rig.node.get(),model.get()))return;
+            if(rootCount==roots.size())return;
+            roots[rootCount++]=b.rig.node.get();
+        }
+        bool wrote{};
+        for(auto& b:bones)if(b.wrote){rotation(b.rig.node->local.rotate,b.output);wrote=true;}
+        if(!wrote)return;
+        // FSMP writes world transforms without changing local rotations. Force
+        // this refresh even when every local rotation already equals output.
+        // No animation evaluation, clocks, history, audio or physics step here.
+        RE::NiUpdateData data{};unsigned budget=4096;
+        for(unsigned i=0;i<rootCount;++i)walk(roots[i],[&](Object* n){n->UpdateWorldData(&data);},budget);
+        std::unordered_set<RE::BSFlattenedBoneTree*> updated;
+        for(unsigned root=0;root<rootCount;++root){
+            auto node=roots[root];
+            for(unsigned depth=0;node&&depth<64;++depth,node=node->parent){
+                const auto tree=netimmerse_cast<RE::BSFlattenedBoneTree*>(node);
+                if(!tree||!updated.insert(tree).second)continue;
+                auto& cache=tree->GetRuntimeData();
+                if(!cache.boneEntries||cache.numBones>2048)continue;
+                std::vector<bool> owned(cache.numBones);
+                for(unsigned i=0;i<cache.numBones;++i){auto& entry=cache.boneEntries[i];
+                    if(entry.node){
+                        for(unsigned j=0;j<rootCount;++j)if(inside(entry.node,roots[j])){owned[i]=true;break;}
+                        if(owned[i]){entry.local=entry.node->local;entry.world=entry.node->world;}
+                    }else if(entry.parentIndex>=0&&static_cast<unsigned>(entry.parentIndex)<i&&owned[entry.parentIndex]){
+                        owned[i]=true;entry.world=cache.boneEntries[entry.parentIndex].world*entry.local;
+                    }
+                }
+            }
+        }
+        if(smpSamples++<3)SKSE::log::debug("SMP wing final pose applied after frame sync: bones={} tick={} ownership={:.3f}",bones.size(),tick,ownership);
+    }
     void restore(){for(auto& b:bones)if(b.wrote&&std::abs(legs::dot(rotation(b.rig.node->local.rotate),b.output))>.99999f){rotation(b.rig.node->local.rotate,b.before);b.wrote=false;}}
     void apply(Object* object,RE::NiUpdateData* data,bool post){
         std::lock_guard lock(mutex);if(!profile||body.get()!=object||!current())return;
@@ -654,11 +783,19 @@ struct RegisteredWingRuntime::State : std::enable_shared_from_this<State> {
         }
     }
 };
-void TransformUpdate::thunk(RE::NiTimeController* controller,float time){
-    original(controller,time);
-    const auto map=wingControllers.load();if(!map)return;
-    const auto found=map->find(controller);if(found==map->end())return;
-    const auto state=found->second.state.lock();if(!state)return;
+void SMPFrameSync::thunk(void* platform){
+    original(platform);
+    const auto states=smpStates.load();if(!states)return;
+    for(const auto& weak:*states)if(const auto state=weak.lock())state->finishSMPFrame();
+}
+void TransformUpdate::thunk(RE::NiTimeController* controller,RE::NiUpdateData* data){
+    // This vtable belongs to every NiTransformController, including scenery.
+    // Unrelated controllers never enter the player's appearance/wing passes.
+    const auto map=wingControllers.load();if(!map){original(controller,data);return;}
+    const auto found=map->find(controller);if(found==map->end()){original(controller,data);return;}
+    const auto state=found->second.state.lock();if(!state){original(controller,data);return;}
+    WingAppearancePass appearance(netimmerse_cast<RE::NiAVObject*>(controller->target),data);
+    original(controller,data);
     bool compute{};
     {std::lock_guard lock(state->mutex);
         if(!state->profile||!state->current()||state->ownership<=.0001f||found->second.bone>=state->bones.size())return;
@@ -666,11 +803,12 @@ void TransformUpdate::thunk(RE::NiTimeController* controller,float time){
         compute=state->applied!=state->tick;
         if(!compute&&b.wrote){const auto native=rotation(b.rig.node->local.rotate);b.before=native;rotation(b.rig.node->local.rotate,b.output);}
     }
-    if(compute)state->apply(state->body.get(),nullptr,false);
+    if(compute)state->apply(state->body.get(),data,false);
 }
 RegisteredWingRuntime::RegisteredWingRuntime()=default;
 RegisteredWingRuntime::~RegisteredWingRuntime(){release(false);}
 WingPlayback RegisteredWingRuntime::prepare(WingMatch match){
+    WingAppearancePass appearance(match.owner?match.owner->Get3D(false):nullptr);
     if(!registeredWing(match.profile)||!match.owner)return {};
     if(match.profile->wingTemplate!=channel::Template::invisible&&!vampireSceneReady()){
         diagnostic::report("registration.scene-callback-unavailable","cannot animate registered wing bones",match.owner,match.profile->id);return {};}
@@ -732,6 +870,11 @@ WingPlayback RegisteredWingRuntime::prepare(WingMatch match){
                         reason.empty()?"no sequence track matches a registered wing bone":reason);
             }
             if(!installTransformHook())return {};
+            const bool smpNamed=std::any_of(s->bones.begin(),s->bones.end(),[](const auto& b){
+                const std::string_view name=b.rig.node->name.c_str();
+                return channel::stableWingNodeName(name)!=name;
+            });
+            s->smpFinalPass=smpNamed&&installSMPFrameSync();
         }
         s->clocks.reset(match.profile->timing.glideEntryPhase);state_=s;
         {std::lock_guard lock(sceneMutex);auto next=std::make_shared<SceneMap>();if(const auto old=scenes.load())for(const auto& [object,entries]:*old)for(const auto& weak:entries)if(!weak.expired())(*next)[object].push_back(weak);
@@ -741,6 +884,11 @@ WingPlayback RegisteredWingRuntime::prepare(WingMatch match){
             for(unsigned i=0;i<s->bones.size();++i){unsigned count{};for(auto c=s->bones[i].rig.node->GetControllers();c&&count++<16;c=c->GetNext())
                 if(*reinterpret_cast<const std::uintptr_t*>(c)==transformTable)(*controllers)[c]={s,i};}
             wingControllers.store(controllers);
+            if(s->smpFinalPass){
+                auto nextSMP=std::make_shared<SMPStates>();
+                if(const auto old=smpStates.load())for(const auto& weak:*old)if(!weak.expired())nextSMP->push_back(weak);
+                nextSMP->push_back(s);smpStates.store(nextSMP);
+            }
         }
         SKSE::log::debug("Registered wing bound: actor={:08X} template={} bones={}; wing branches only",match.owner->GetFormID(),channel::templateName(match.profile->wingTemplate),s->bones.size());
     }

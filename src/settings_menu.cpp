@@ -3,6 +3,8 @@
 #include "gamepad_input.hpp"
 #include "diagnostics.hpp"
 #include "registered_wings.hpp"
+#include "wing_appearance.hpp"
+#include "actor_flight.hpp"
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
 #include <algorithm>
@@ -20,6 +22,11 @@ namespace {
 std::mutex menuMutex;
 Configuration draft;
 ApplyMenuSettings applySettings;
+ApplyWingAppearanceSettings applyAppearanceSettings;
+appearance::ProfileSettings appearanceDraft;
+std::string appearanceKey,appearanceStatus="Changes apply only to the wings currently equipped or summoned.";
+std::uint64_t appearanceRevision{};
+bool appearancePending{};
 std::string status="Changes take effect after Apply and Save. No game restart is required.";
 bool pending{};
 int capture{}; // keyboard 1..3, gamepad 4..6; guarded by menuMutex
@@ -96,7 +103,7 @@ void actions() {
                 std::lock_guard lock(menuMutex);
                 pending=false;
                 if(error.empty()) {
-                    status="Applied and saved to Data/SKSE/Plugins/Wingflight.ini.";
+                    status="Applied and saved to Data/SKSE/Plugins/Wingflight/Settings.ini.";
                     SKSE::log::debug("Mod Control Panel: live settings applied and saved");
                 } else {status="Settings were not applied: "+error;SKSE::log::warn("Mod Control Panel: {}",error);}
             });
@@ -111,7 +118,7 @@ void renderSection(const char* section) {
     if(std::string_view(section)=="FreeFlight")
         ImGuiMCP::TextWrapped("Automatic beats add lift during the downstroke, then coast under Flight/Gravity. Hold Descend for automatic wingbeats targeting Flight/DescentSpeed; Space still gives a full manual beat. Manual mode uses the same descending beats without holding Descend. Release resumes hovering at the new altitude. High-speed flight ignores Descend and follows the camera. AutoFlapCost = 0 makes automatic beats free.");
     if(std::string_view(section)=="Flight")
-        ImGuiMCP::TextWrapped("Fairy/Chaurus wings use continuous flight: hover at rest, hold Jump to rise, hold Descend to descend. K is ignored. Camera direction controls high-speed flight. Descent uses GlideFallSpeed; RiseSpeed is in AWU Fairy.ini and requires a restart. Wingbeat impulse/cost settings do not apply.");
+        ImGuiMCP::TextWrapped("Fairy/Chaurus wings use continuous flight: hover at rest, hold Jump to rise, hold Descend to descend. K is ignored. Camera direction controls high-speed flight. Descent uses DescentSpeed; outside-flight held-Jump glide uses the separate GlideFallSpeed. RiseSpeed is in AWU Fairy.ini and requires a restart. Wingbeat impulse/cost settings do not apply.");
     ImGuiMCP::BeginDisabled(pending||capture!=0);
     auto slider=[](const LiveFloatSetting& setting){
         ImGuiMCP::SliderFloat(setting.key,&setting.value(draft),setting.minimum,setting.maximum,"%.2f");
@@ -127,6 +134,8 @@ void renderSection(const char* section) {
     for(const auto& setting:liveFloatSettings)if(std::string_view(setting.section)==section
         &&&setting!=&*groundHover&&&setting!=&*groundSpeed&&&setting!=&*groundBeat)slider(setting);
     if(std::string_view(section)=="Flight") {
+        ImGuiMCP::Checkbox("Allow Flight While Overencumbered",&draft.tuning.allowOverencumberedFlight);
+        tooltip("Off by default: Skyrim's native overencumbrance check blocks player takeoff and held-Jump glide. Becoming overencumbered during either ends it normally. On permits flight regardless of carried weight. Does not change ordinary jumping, wing animations or NPC flight. Apply and Save takes effect immediately.");
         ImGuiMCP::Checkbox("End Flight on Ground",&draft.tuning.endFlightOnGround);
         tooltip("On: supporting ground ends full flight. Off: retain flight and use Ground Contact Behavior below. Held-Jump glide, damaging collisions and other flight interruptions keep their normal exit rules.");
         ImGuiMCP::BeginDisabled(draft.tuning.endFlightOnGround);
@@ -144,6 +153,8 @@ void renderSection(const char* section) {
         tooltip("Disable armed sprint flight. Drawing a weapon also ends high-speed flight. Ground sprint is unchanged.");
     }
     if(std::string_view(section)=="Jump") {
+        ImGuiMCP::Checkbox("Fold Wings While Sneaking",&draft.foldWingsWhileSneaking);
+        tooltip("Keep player AWU dragon/feather wings folded while sneaking on the ground, in first or third person. Independent of Control Jump Wing Animations. Jumping, gliding, full flight and swimming take priority. Default off. Apply and Save takes effect immediately.");
         ImGuiMCP::Checkbox("Control Jump Wing Animations",&draft.controlJumpWingAnimations);
         tooltip("Control partial jump opening and require held Jump for AWU dragon/feather airborne flutter, including falling after flight exit or stepping off a ledge. While swimming, block only wing jump-opening events; normal ascent and swimming animations stay native. Sneaking, weapon draw and casting stay native. Off restores native jump/fall wing behavior. Full flight and the separate Glide/Enabled setting are unchanged. Apply and Save takes effect immediately.");
     }
@@ -157,7 +168,21 @@ void renderSection(const char* section) {
         tooltip("Allow winged NPCs following the player to take off. Off prevents new takeoffs and safely lands airborne NPCs. Does not change player flight.");
         ImGuiMCP::Checkbox("Allow Air Combat",&draft.actors.airCombat);
         tooltip("Allow already-flying followers to fight in air. Native AI chooses enemies, equipment and attacks; Wingflight moves melee fighters into reach and keeps ranged fighters at weapon range. Off safely lands them for combat. Fleeing or unavailable combat data falls back to ground combat.");
-        ImGuiMCP::TextWrapped("FollowDistance sets the gap behind your current position. Apply and Save changes these settings without restarting. NPCs need supported wings and an active follow order. Air combat ends in following or landing when combat stops.");
+        ImGuiMCP::Checkbox("Give Wings to Wingless Followers",&draft.actors.autoWings);
+        tooltip("While you are in full flight, temporarily give following NPCs the selected AWU wings if they have no supported wings. Requires Animated Wings Ultimate and its wing providers. Existing wings take priority. No equipment or permanent abilities are added. When you stop flying or disable this option, followers land before the temporary wings are removed. Default off.");
+        const auto wingOptions=followerWingOptions();
+        if(wingOptions.empty())ImGuiMCP::TextWrapped("Temporary wings require Animated Wings Ultimate and its installed wing providers.");
+        else{
+            int selected=-1;std::vector<const char*> labels;
+            for(std::size_t i=0;i<wingOptions.size();++i){labels.push_back(wingOptions[i].name.c_str());if(wingOptions[i].effectID==draft.actors.autoWingsEffect)selected=static_cast<int>(i);}
+            ImGuiMCP::BeginDisabled(!draft.actors.enabled||!draft.actors.autoWings);
+            if(ImGuiMCP::Combo("AWU wing style",&selected,labels.data(),static_cast<int>(labels.size()))&&selected>=0)
+                draft.actors.autoWingsEffect=wingOptions[selected].effectID;
+            tooltip("Choose from installed, recognized AWU wing styles. After Apply and Save, newly created pairs use this style. Followers already in flight keep their current wings until landing.");
+            ImGuiMCP::EndDisabled();
+            if(selected<0)ImGuiMCP::TextWrapped("The saved wing style is unavailable. Select an installed style to use automatic wings.");
+        }
+        ImGuiMCP::TextWrapped("FollowDistance sets the gap behind your current position. Apply and Save changes these settings without restarting. NPCs need supported wings (or the temporary AWU wings above) and an active follow order. Air combat ends in following or landing when combat stops.");
     }
     if(std::string_view(section)=="LowerBody") {
         ImGuiMCP::Checkbox("RelaxedArmedLegs",&draft.legRelaxation.enabled);
@@ -175,6 +200,35 @@ void renderSection(const char* section) {
     }
     actions();
     ImGuiMCP::EndDisabled();
+}
+void __stdcall renderAppearance(){
+    const auto current=currentWingAppearance();
+    std::lock_guard lock(menuMutex);
+    if(current.key!=appearanceKey||current.revision!=appearanceRevision){
+        appearanceKey=current.key;appearanceRevision=current.revision;appearanceDraft=current.values;
+    }
+    ImGuiMCP::TextWrapped("Current wings: %s",current.key.empty()?"None - equip or summon supported wings":current.name.c_str());
+    ImGuiMCP::TextWrapped("Each pair of wings remembers its own settings. Equip different wings to edit them here. Apply and Save changes only the wings shown above.");
+    if(!current.error.empty())ImGuiMCP::TextWrapped("%s",current.error.c_str());
+    ImGuiMCP::BeginDisabled(current.key.empty()||appearancePending||pending||capture!=0);
+    ImGuiMCP::SliderFloat("Normal size (%)",&appearanceDraft.normalScale,10,200,"%.2f%%");
+    tooltip("Wing size outside Wingflight flight/glide. 100% is the model's original size. Ordinary jumps use this size.");
+    ImGuiMCP::SliderFloat("Flying size (%)",&appearanceDraft.flightScale,10,200,"%.2f%%");
+    tooltip("Size during full flight or held-Jump glide, including retained ground flight. Entering and exiting blends over about half a second; paused game time does not advance the blend.");
+    ImGuiMCP::SliderFloat("Vertical offset",&appearanceDraft.verticalOffset,-60,60,"%.2f");
+    tooltip("Move this pair of wings along the torso in Skyrim units. Negative moves toward the waist. The same height is used in both size modes.");
+    if(ImGuiMCP::Button("Restore original size and position"))appearanceDraft={};
+    ImGuiMCP::Separator();
+    if(ImGuiMCP::Button("Apply and Save")){
+        appearancePending=true;appearanceStatus="Saving current wing settings...";
+        const auto key=appearanceKey;const auto values=appearanceDraft;
+        SKSE::GetTaskInterface()->AddTask([key,values]{
+            std::string error;try{error=applyAppearanceSettings(key,values);}catch(const std::exception& e){error=e.what();}
+            std::lock_guard lock(menuMutex);appearancePending=false;
+            appearanceStatus=error.empty()?"Saved for these wings. Other wings keep their own settings.":error;
+        });
+    }
+    ImGuiMCP::EndDisabled();ImGuiMCP::TextWrapped("%s",appearanceStatus.c_str());
 }
 void __stdcall renderFlight(){renderSection("Flight");}
 void __stdcall renderFree(){renderSection("FreeFlight");}
@@ -224,7 +278,7 @@ bool settingsMenuOpen() {
     if(!registered.load(std::memory_order_acquire)||!mainWindow)return false;
     const auto window=mainWindow();return window&&window->IsOpen.load();
 }
-void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) {
+void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply,ApplyWingAppearanceSettings appearance) {
     // No import-library link: without this optional framework the INI still works.
     const auto module=GetModuleHandleW(L"SKSEMenuFramework.dll");
     if(!module){SKSE::log::info("SKSE Menu Framework is not loaded; Wingflight uses INI settings");return;}
@@ -235,10 +289,11 @@ void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) 
         SKSE::log::warn("SKSE Menu Framework lacks {}; menu skipped, INI remains available",name);return;
     }
     mainWindow=reinterpret_cast<MainWindow>(GetProcAddress(module,"GetMainWindow"));
-    draft=initial;applySettings=std::move(apply);
+    draft=initial;applySettings=std::move(apply);applyAppearanceSettings=std::move(appearance);
     SKSEMenuFramework::SetSection("Wingflight");
     SKSEMenuFramework::AddSectionItem("Flight",renderFlight);
     SKSEMenuFramework::AddSectionItem("NPC Flight",renderNPCFlight);
+    SKSEMenuFramework::AddSectionItem("Wing Appearance",renderAppearance);
     bool customMenu=true;
     for(const auto name:{"igTextUnformatted","igNewLine","igPushID_Int"})if(!GetProcAddress(module,name)){
         customMenu=false;SKSE::log::warn("Custom Wings panel unavailable: SKSE Menu Framework lacks {}; registration INIs remain available",name);}
@@ -252,6 +307,6 @@ void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply) 
     captureInput=std::make_unique<SKSEMenuFramework::Model::InputEvent>(onInput);
     registered.store(true,std::memory_order_release);
     SKSEMenuFramework::AddSectionItem("Logging",renderLogging);
-    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, NPC Flight, Custom Wings available={}, Free Flight, Stamina, Jump, Lower Body, Collision, Controls, Logging",customMenu);
+    SKSE::log::info("Registered Wingflight Mod Control Panel: Flight, NPC Flight, Wing Appearance, Custom Wings available={}, Free Flight, Stamina, Jump, Lower Body, Collision, Controls, Logging",customMenu);
 }
 }

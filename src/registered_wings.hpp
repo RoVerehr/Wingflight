@@ -18,6 +18,8 @@ inline bool largeWingSprint(const WingProfile* p){return p&&(p->nativeVampire||p
 // Called on the game task thread. UI only exchanges value snapshots.
 void loadWingRegistrations();
 WingMatch findRegisteredWings(RE::Actor* actor);
+// Detect an equipped/active registration even before its model can bind.
+bool hasRegisteredWingSource(RE::Actor* actor);
 std::vector<WingCandidate> scanWingCandidates(RE::Actor* actor);
 std::vector<WingProfile> wingRegistrationProfiles();
 std::string saveWingRegistration(WingProfile profile,bool fromScanner=false);

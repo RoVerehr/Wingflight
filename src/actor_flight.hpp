@@ -8,6 +8,9 @@ void initializeActorFlight(const Configuration&,Wings&);
 void updateActorFlightLeader(RE::PlayerCharacter*,float,bool flying,bool paused,float hoverReference=std::numeric_limits<float>::quiet_NaN(),bool highSpeed=false);
 void resetActorFlight();
 bool actorFlightActive(const RE::Actor*);
+struct FollowerWingOption { std::uint32_t effectID{}; std::string name; };
+// UI receives only stable local IDs and labels, never live actor/model pointers.
+std::vector<FollowerWingOption> followerWingOptions();
 // Animation callbacks consume cached ownership, not an AI/package query.
 bool actorFlightPoseSelected(const RE::hkbCharacter*);
 bool actorFlightPoseEligible(const RE::hkbCharacter*);

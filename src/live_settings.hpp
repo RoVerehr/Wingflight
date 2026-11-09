@@ -18,6 +18,8 @@ struct LiveFloatSetting {
 };
 // This is the complete menu allowlist. All other settings remain startup-only.
 inline constexpr auto liveFloatSettings = std::to_array<LiveFloatSetting>({
+    {"WingAppearance","ScalePercent","Player wing size, as a percentage of the original model. 100 restores original size. Applies to recognized AWU, custom and Vampire Lord wings on the ground and in flight; does not change the body or flight physics.",10,200,[](Configuration& c)->float&{return c.wingAppearance.scalePercent;}},
+    {"WingAppearance","VerticalOffset","Move wings up (+) or down (-) along the torso, in character-local Skyrim units. Negative values allow waist placement. 0 restores the original attachment height. Independent of wing size; applies on the ground and in flight.",-60,60,[](Configuration& c)->float&{return c.wingAppearance.verticalOffset;}},
     {"NPCFlight","FollowDistance","Distance behind the player's current position, in Skyrim units (70 units is about one metre). Saved values apply to airborne followers immediately.",70,2000,[](Configuration& c)->float&{return c.actors.followDistance;}},
     {"Jump","OverOpenPercent","Initial jump wing opening, independently set from 0 to 100. 100 opens fully, then WingSettleSeconds transitions to WingOpenPercent. Set both percentages equal for no return motion.",0,100,[](Configuration& c)->float&{return c.jumpWingOverOpenPercent;}},
     {"Jump","WingOpenSeconds","Seconds to ease into the jump opening peak; also used to fold on landing.",.05f,3,[](Configuration& c)->float&{return c.jumpWingOpenSeconds;}},
@@ -35,10 +37,11 @@ inline constexpr auto liveFloatSettings = std::to_array<LiveFloatSetting>({
     {"Flight","FlapImpulse","Vertical velocity budget per large wingbeat, delivered during its downstroke. Not a height distance.",0.1f,10,[](Configuration& c)->float&{return c.tuning.lift;}},
     {"Flight","MaxRise","Upper bound for wingbeat-added upward velocity, not height. Inherited faster native upward momentum is not abruptly braked in free flight.",0.5f,15,[](Configuration& c)->float&{return c.tuning.maxRise;}},
     {"Flight","Gravity","Shared simulated downward acceleration (Havok units/s^2) in manual and free flight. Native player gravity is temporarily disabled during full flight.",0.1f,20,[](Configuration& c)->float&{return c.tuning.gravity;}},
-    {"Flight","GlideFallSpeed","Glide speed limit when automatic wingbeat stamina is unavailable, for outside-flight held-Jump glide, and for Continuous flight descent.",0.1f,8,[](Configuration& c)->float&{return c.tuning.glideFall;}},
+    {"Flight","GlideFallSpeed","Glide speed limit for outside-flight held-Jump glide and when automatic wingbeat stamina is unavailable. Continuous flight's held Descend uses DescentSpeed instead.",0.1f,8,[](Configuration& c)->float&{return c.tuning.glideFall;}},
+    {"Flight","GlideDeceleration","Maximum reduction of falling speed per second while entering outside-flight held-Jump glide, in Havok velocity units per second. Smaller values brake more gently; a faster initial fall takes longer to reach GlideFallSpeed. Does not change full-flight Descend or native horizontal/upward movement.",0.1f,30,[](Configuration& c)->float&{return c.tuning.glideDeceleration;}},
     {"Flight","GroundHoverHeight","Only with End Flight on Ground off and normal ground behavior: automatic beats in either K mode that start on the floor lift only to this clearance (Havok units; 1 is about 70 Skyrim units). Space keeps its full lift.",0.1f,3,[](Configuration& c)->float&{return c.tuning.groundHoverHeight;}},
     {"Flight","GroundBeatDistance","Only with End Flight on Ground off and normal ground behavior: after touching down, automatic beats keep the normal speed while the floor below (vertical ray) is within this distance, and aim GroundHoverHeight above it. Farther away they slow, so you sink gently. Havok units; 1 is about 70 Skyrim units.",0.1f,3,[](Configuration& c)->float&{return c.tuning.groundBeatDistance;}},
-    {"Flight","DescentSpeed","Target sink speed in Havok units per second: manual flight without Space, Free Flight while holding Descend, and Normal ground flight farther than GroundBeatDistance from the floor. Wingbeats speed up when you fall faster and slow down when you fall slower (never faster than normal). Each beat still swings the speed a little around the target; at the top of the range a swing can pass Collision/MinImpactSpeed (8 by default) and cause impact damage. Apply and Save takes effect immediately.",0.5f,8,[](Configuration& c)->float&{return c.tuning.descentSpeed;}},
+    {"Flight","DescentSpeed","Target sink speed in Havok units per second: manual wingbeat flight without Space, Free Flight while holding Descend, Continuous flight while holding Descend, and Normal ground flight farther than GroundBeatDistance from the floor. Continuous flight approaches this speed directly. Ordinary wingbeats speed up when you fall faster and slow down when you fall slower (never faster than normal). Each beat still swings the speed a little around the target; at the top of the range a swing can pass Collision/MinImpactSpeed (8 by default) and cause impact damage. Apply and Save takes effect immediately.",0.5f,8,[](Configuration& c)->float&{return c.tuning.descentSpeed;}},
     {"Flight","GroundWingIdleSpeedPercent","Ground wing idle only: visual wingbeat speed as a percentage of normal speed. 100 = normal; 75 = 25% slower; 50 = half speed; 120 = 20% faster; 200 = double speed. Manual Space wingbeats keep their normal speed. Apply and Save takes effect immediately.",10,200,[](Configuration& c)->float&{return c.tuning.groundWingIdleSpeedPercent;}},
     {"Flight","FlapCooldown","Minimum seconds between accepted manual wingbeats.",0.1f,2,[](Configuration& c)->float&{return c.tuning.flapCooldown;}},
     {"Flight","FlapSpeedMultiplier","Each accepted sprint wingbeat adds this value minus 1 to the extra speed multiplier.",1,3,[](Configuration& c)->float&{return c.tuning.flapSpeedMultiplier;}},
@@ -69,6 +72,7 @@ inline std::string validateLiveSettings(Configuration candidate) {
             return std::string(setting.section)+"/"+setting.key+" is out of range: value="+std::to_string(value)
                 +" expected="+std::to_string(setting.minimum)+".."+std::to_string(setting.maximum)+".";
     }
+    if(candidate.actors.autoWingsEffect==0||candidate.actors.autoWingsEffect>0xFFFFFF)return "Temporary AWU wings must use a valid local effect ID.";
     if (candidate.modeKey>255 || candidate.landKey>255 || candidate.descendKey>255) return "Keyboard scan codes must be in 0..255.";
     const auto keys=std::array{candidate.modeKey,candidate.landKey,candidate.descendKey};
     for(std::size_t i=0;i<keys.size();++i)
@@ -98,12 +102,16 @@ inline void applyLiveSettings(Configuration& current, Configuration candidate, f
     roundLiveSettings(candidate);
     for (const auto& setting : liveFloatSettings) setting.value(current)=setting.value(candidate);
     current.disableSprintWhenArmed=candidate.disableSprintWhenArmed;
+    current.tuning.allowOverencumberedFlight=candidate.tuning.allowOverencumberedFlight;
     current.tuning.endFlightOnGround=candidate.tuning.endFlightOnGround;
     current.tuning.groundWingIdle=candidate.tuning.groundWingIdle;
     current.actors.enabled=candidate.actors.enabled;
     current.actors.airCombat=candidate.actors.airCombat;
+    current.actors.autoWings=candidate.actors.autoWings;
+    current.actors.autoWingsEffect=candidate.actors.autoWingsEffect;
     current.logSamples=candidate.logSamples;
     current.controlJumpWingAnimations=candidate.controlJumpWingAnimations;
+    current.foldWingsWhileSneaking=candidate.foldWingsWhileSneaking;
     current.collision.enabled=candidate.collision.enabled;
     current.collision.damageActors=candidate.collision.damageActors;
     current.legRelaxation.enabled=candidate.legRelaxation.enabled;

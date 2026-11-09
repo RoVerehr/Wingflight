@@ -9,8 +9,9 @@
 #include <unordered_map>
 
 namespace wingflight {
-// All three pointers are borrowed for the current update, not retained owners.
-struct WingMatch { const WingProfile* profile{}; RE::ActiveEffect* effect{}; RE::Actor* owner{}; RE::NiAVObject* model{}; };
+// Borrowed for this update. runtimeArt is only supplied by an actor flight state
+// holding its own temporary model; ordinary providers leave it null.
+struct WingMatch { const WingProfile* profile{}; RE::ActiveEffect* effect{}; RE::Actor* owner{}; RE::NiAVObject* model{}; RE::TESForm* source{}; RE::ModelReferenceEffect* runtimeArt{}; };
 struct WingPlayback {
     bool found{}, active{}, gliding{},spreadActive{};
     float spreadWeight{},graphSpreadWeight{};
@@ -24,13 +25,15 @@ public:
     bool initialize(float amplitude);
     void advanceVisual(float delta);
     void resolve(const Configuration& cfg);
-    WingMatch find(RE::Actor* actor,bool ownedFlight=false) const;
+    WingMatch find(RE::Actor* actor,bool ownedFlight=false,bool appearanceOnly=false) const;
+    bool hasWingSource(RE::Actor* actor) const;
     bool send(WingMatch match, const std::string& event) const;
     WingPlayback prepareVisual(WingMatch match);
     void prepareContinuousAnimation(WingMatch match,bool active,bool highSpeed,float fastMultiplier,float dt=0);
     void setFlapRate(float rate);
     bool setBlend(WingMatch match, float flapWeight, float ownership=1,float fast=0) const;
     bool setJumpPreview(WingMatch match,float amount,float period,float amplitude);
+    void playJumpOpeningSound(WingMatch match);
     bool parkInvisibleFlap();
     bool parkInvisibleGlide();
     void updateGlideRate(float multiplier,float spreadMultiplier=1);

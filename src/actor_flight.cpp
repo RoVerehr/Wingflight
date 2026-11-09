@@ -1,4 +1,7 @@
+#include "wing_audio.hpp"
+#include "wing_models.hpp"
 #include "actor_flight.hpp"
+#include "temporary_wing_creation.hpp"
 #include "actor_state.hpp"
 #include "actor_combat_policy.hpp"
 #include "actor_spell_aim_policy.hpp"
@@ -38,6 +41,14 @@ float formationYaw{};
 RE::TESWorldSpace* leaderWorld{};RE::TESObjectCELL* leaderCell{};
 RE::NiPoint3 previousLeader{};bool hadLeader{};
 RE::TESFaction* followerFaction{};
+struct TemporaryWingChoice { FollowerWingOption option; WingProfile profile; RE::BGSArtObject* art{}; };
+std::mutex temporaryChoicesLock;
+std::vector<std::shared_ptr<const TemporaryWingChoice>> temporaryChoices;
+std::shared_ptr<const TemporaryWingChoice> temporaryChoice(std::uint32_t id){
+    std::lock_guard guard(temporaryChoicesLock);
+    for(const auto& choice:temporaryChoices)if(choice->option.effectID==id)return choice;
+    return {};
+}
 thread_local RE::Actor* updatingActor{};
 thread_local RE::Actor* commandingActor{};
 bool flightEvent(RE::Actor* actor,const char* event){
@@ -108,7 +119,7 @@ void installChannels(RE::Actor* actor){
     SKSE::log::info("NPC pre-evaluation animation channels installed: vtable={:X} chainedTarget={:X}",table,previous);
 }
 
-struct ActorFlight {
+struct ActorFlight : std::enable_shared_from_this<ActorFlight> {
     RE::ActorHandle actor;
     RE::FormID id{};
     RE::NiPointer<RE::bhkCharacterController> controller;
@@ -135,6 +146,13 @@ struct ActorFlight {
     unsigned reportedSpellAimFallbacks{};
     const WingProfile* profile{};
     RE::ActiveEffect* effect{}; // Identity only; reacquired from the actor every update.
+    RE::NiPointer<RE::ModelReferenceEffect> temporaryWing;
+    std::shared_ptr<const TemporaryWingChoice> temporaryChoice;
+    float temporaryWingWait{},temporaryWingRetry{};
+    bool temporaryWingRetiring{};
+    bool temporaryWingPending{};
+    std::uint64_t temporaryWingEpoch{};
+    float temporaryWingRefreshAge{};
     Vec3 goal{},normal{},followGoal{},followVelocity{};
     Vec3 targetVelocity{};
     aerial::CombatSession combatSession;
@@ -256,6 +274,86 @@ bool safe(RE::Actor* a){return a&&a->Is3DLoaded()&&!a->IsDisabled()&&!a->IsDead(
 bool movableNPC(RE::Actor* a){const auto state=a?a->AsActorState():nullptr;return safe(a)&&state&&a->IsAIEnabled()&&!a->IsOnMount()
     &&!state->IsSwimming()&&!state->IsBleedingOut()&&!state->IsUnconscious()
     &&state->GetSitSleepState()==RE::SIT_SLEEP_STATE::kNormal&&state->GetLifeState()!=RE::ACTOR_LIFE_STATE::kRestrained;}
+void clearTemporaryWing(ActorFlight& s){
+    ++s.temporaryWingEpoch;s.temporaryWingPending=false;s.temporaryWingRefreshAge=0;
+    if(s.temporaryWing){
+        const auto model=s.temporaryWing;const auto owner=s.actor;
+        SKSE::GetTaskInterface()->AddTask([model,owner]{
+            if(model->target.native_handle()==owner.native_handle())model->finished=true;
+        });
+    }
+    s.temporaryWing.reset();s.temporaryChoice.reset();s.temporaryWingWait=0;s.temporaryWingRetiring=false;
+}
+void requestTemporaryWing(ActorFlight& s,std::shared_ptr<const TemporaryWingChoice> choice){
+    s.temporaryWingPending=true;const auto epoch=++s.temporaryWingEpoch;
+    const auto weak=s.weak_from_this();
+    SKSE::GetTaskInterface()->AddTask([weak,epoch,choice]{
+        const auto state=weak.lock();if(!state)return;
+        std::lock_guard guard(state->stateLock);
+        if(!state->temporaryWingPending||state->temporaryWingEpoch!=epoch)return;
+        state->temporaryWingPending=false;
+        const auto actor=state->actor.get();
+        if(!movableNPC(actor.get())||suspended.load()||!leaderFlying.load()||!state->following
+            ||!settings->actors.enabled||!settings->actors.autoWings||settings->actors.autoWingsEffect!=choice->option.effectID
+            ||providers->hasWingSource(actor.get()))return;
+        const auto owner=state->actor.native_handle();
+        auto snapshot=[&]{
+            std::vector<RE::NiPointer<RE::ModelReferenceEffect>> models;unsigned visited{};
+            if(const auto lists=RE::ProcessLists::GetSingleton())lists->ForEachMagicTempEffect([&](RE::BSTempEffect* effect){
+                if(++visited>4096)return RE::BSContainer::ForEachResult::kStop;
+                const auto model=effect?effect->As<RE::ModelReferenceEffect>():nullptr;
+                if(model&&!model->finished&&model->target.native_handle()==owner&&model->artObject==choice->art)models.emplace_back(model);
+                return RE::BSContainer::ForEachResult::kContinue;
+            });
+            if(visited>4096)throw std::runtime_error("Temporary wing ownership scan exceeded budget.");
+            return models;
+        };
+        try{
+            // Some engine/dependency combinations return a status rather than
+            // a model pointer here. Never put that return value in NiPointer.
+            auto model=aerial::createOwnedTemporaryWing(snapshot,[&]{(void)actor->ApplyArtObject(choice->art,3.f);});
+            if(!model){state->temporaryWingRetry=5;diagnostic::report("npc.temporary-wings-unavailable","retain native follower movement; let unowned finite art expire",actor.get());return;}
+            state->temporaryChoice=choice;state->temporaryWing=std::move(model);
+            state->temporaryWingWait=state->temporaryWingRefreshAge=0;
+            SKSE::log::debug("Temporary follower wings created: actor={:08X} art={:08X} style={}; acquired from engine effect list on game task thread",actor->GetFormID(),choice->art->GetFormID(),choice->option.name);
+        }catch(const std::exception& e){state->temporaryWingRetry=5;SKSE::log::warn("Temporary follower wing creation failed: actor={:08X} {}",actor->GetFormID(),e.what());}
+    });
+}
+WingMatch temporaryWingMatch(ActorFlight& s,RE::Actor* a,float dt){
+    const bool requested=settings->actors.enabled&&settings->actors.autoWings;
+    if(s.temporaryWing){
+        if(!aerial::keepFollowerWings(requested&&!s.temporaryWingRetiring,s.motion.active(),s.following,leaderFlying.load())
+            ||s.temporaryWing->finished||s.temporaryWing->target.native_handle()!=s.actor.native_handle())return {};
+    }else{
+        if(s.temporaryWingPending)return {};
+        if(!requested||!leaderFlying.load()||!s.following||suspended.load()||s.temporaryWingRetry>0)return {};
+        const auto choice=temporaryChoice(settings->actors.autoWingsEffect);
+        if(suspended.load()||!aerial::mayCreateFollowerWings(requested,leaderFlying.load(),s.following,providers->hasWingSource(a),choice!=nullptr)
+            ||s.temporaryWingRetry>0)return {};
+        // A follower with another rig/project must not receive a humanoid wing
+        // visual merely because it is a teammate (pets, transformations, etc.).
+        bool graph{};if(!a->GetGraphVariableBool("Wingflight_IsFlying",graph))return {};
+        requestTemporaryWing(s,choice);return {};
+    }
+    // Retain a short remaining lifetime, rather than an indefinite saved ART,
+    // if this runtime owner disappears after a load or interrupted session.
+    s.temporaryWingRefreshAge+=dt;
+    if(s.temporaryWingRefreshAge>=.5f){
+        s.temporaryWingRefreshAge=0;const auto weak=s.weak_from_this();const auto epoch=s.temporaryWingEpoch;
+        SKSE::GetTaskInterface()->AddTask([weak,epoch]{
+            const auto state=weak.lock();if(!state)return;std::lock_guard guard(state->stateLock);
+            const auto model=state->temporaryWing;
+            if(state->temporaryWingEpoch!=epoch||!model||model->finished||model->target.native_handle()!=state->actor.native_handle())return;
+            const float expiry=aerial::temporaryWingExpiry(model->age);
+            if(expiry>0)model->lifetime=expiry;else model->finished=true;
+        });
+    }
+    if(!s.bound&&!suspended.load()){
+        s.temporaryWingWait+=dt;
+        if(s.temporaryWingWait>5){s.temporaryWingRetry=2;return {};}
+    }
+    return {&s.temporaryChoice->profile,nullptr,a,nullptr,nullptr,s.temporaryWing.get()};
+}
 void releaseMovementControl(ActorFlight& s,RE::Actor* a){
     const auto current=a?a->GetActorRuntimeData().movementController.get():nullptr;
     if(current&&current==s.movementController&&s.restoreAIDriven&&current->GetControlsDriven())
@@ -463,6 +561,7 @@ void combatIntent(ActorFlight& s,RE::Actor* a,float dt,Vec3 at){
     }
     const bool airborneCombat=action==aerial::CombatAction::hold||action==aerial::CombatAction::engage;
     s.flightWanted=aerial::combatFlightWanted(settings->actors.enabled,s.following,leaderFlying.load(),s.owned.load(),action);
+    if(s.temporaryWing&&(!settings->actors.autoWings||!leaderFlying.load()||s.temporaryWingRetiring))s.flightWanted=false;
     s.goal=s.followGoal;s.targetVelocity=s.followVelocity;
     if(airborneCombat){
         s.targetVelocity={};s.goal=s.combatHold;
@@ -474,9 +573,9 @@ void combatIntent(ActorFlight& s,RE::Actor* a,float dt,Vec3 at){
     if(!fighting){s.combatSpacing={};s.combatReady=s.combatFleeing=false;s.combatTarget={};s.combatStyle=aerial::CombatStyle::unknown;s.combatItem=0;s.combatSampleAge=.1f;s.combatEvidenceReason="not sampled";}
 }
 void artEvent(WingMatch match,const char* event){
-    if(!match.profile||match.profile->animationless||!match.profile->awuCompatibility||!match.effect||!match.effect->hitEffects)return;
-    for(const auto effect:*match.effect->hitEffects)if(effect&&!effect->finished&&effect->GetType()==RE::TEMP_EFFECT_TYPE::kRefModel){
-        auto model=static_cast<RE::ModelReferenceEffect*>(effect);
+    if(!match.profile||match.profile->animationless||!nativeWingControls(match.profile)||(!match.effect&&!match.runtimeArt))return;
+    for(const auto& owned:wingModels(match)){
+        auto model=owned.get();
         if(model->GetAttached()&&model->Get3D()&&!model->NotifyAnimationGraph(event))
             diagnostic::report("npc.wing-art-event-rejected","retain provider animation and private wing pose",model,event);
     }
@@ -487,11 +586,11 @@ bool groundContact(RE::bhkCharacterController* c){
 }
 void recoverGroundWings(ActorFlight& s,RE::Actor* a,WingMatch match,float dt){
     s.visual.advance(dt);s.registeredWings.advance(dt);s.recoveryAge=std::max(0.f,s.recoveryAge-dt);
-    if(!match.profile||!match.profile->awuCompatibility||match.profile->continuousFlight||!match.effect||!match.effect->hitEffects)return;
+    if(!match.profile||!nativeWingControls(match.profile)||match.profile->continuousFlight||(!match.effect&&!match.runtimeArt))return;
     bool flutter=false;
     const auto table=REL::Relocation<std::uintptr_t>(RE::VTABLE_hkbStateMachine[0]).address();
-    for(const auto effect:*match.effect->hitEffects)if(effect&&!effect->finished&&effect->GetType()==RE::TEMP_EFFECT_TYPE::kRefModel){
-        auto model=static_cast<RE::ModelReferenceEffect*>(effect);RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
+    for(const auto& owned:wingModels(match)){
+        auto model=owned.get();RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
         if(!model->GetAttached()||!model->Get3D()||!model->GetAnimationGraphManager(manager)||!manager)continue;
         RE::BSSpinLockGuard guard(manager->GetRuntimeData().updateLock);
         for(const auto& graph:manager->graphs)if(graph&&graph->projectName=="AnimatedDragonWings"){
@@ -505,7 +604,7 @@ void recoverGroundWings(ActorFlight& s,RE::Actor* a,WingMatch match,float dt){
         }
     }
     if(s.groundRecovery.update(dt,groundContact(a->GetCharController()),false,flutter)){
-        artEvent(match,"MTState");SKSE::log::debug("NPC grounded wing recovery: actor={:08X}; wing-only fold retry after original AWU opening",a->GetFormID());
+        artEvent(match,wingFoldEvent(match.profile));SKSE::log::debug("NPC grounded wing recovery: actor={:08X}; wing-only fold retry after original AWU opening",a->GetFormID());
     }
 }
 void releaseLevitation(ActorFlight& s,RE::Actor* a){
@@ -538,16 +637,18 @@ bool prepareLevitation(ActorFlight& s,RE::Actor* a,float dt){
 void stop(ActorFlight& s,RE::Actor* a,const char* reason,bool landed=false){
     const bool was=s.motion.active()||s.bound;
     if(was&&safe(a)&&s.body.get()==a->Get3D(false)){
-        const auto current=providers->find(a,true);
+        const auto current=s.temporaryWing&&s.temporaryChoice?WingMatch{&s.temporaryChoice->profile,nullptr,a,nullptr,nullptr,s.temporaryWing.get()}:providers->find(a,true);
         if(current.profile==s.profile&&current.effect==s.effect)artEvent(current,"MTState");
     }
-    s.owned=false;s.nativeWingAudio=false;s.descending=false;s.motion.reset();s.altitude.reset();s.strokes.reset();s.visual.release(landed);s.registeredWings.release(landed);s.nativeWings.release(landed);s.logical.reset();s.continuousRate=0;s.bound=false;s.wingGraphs.store(nullptr);
+    const bool temporary=bool(s.temporaryWing);
+    s.owned=false;s.nativeWingAudio=false;s.descending=false;s.motion.reset();s.altitude.reset();s.strokes.reset();s.visual.release(landed&&!temporary);s.registeredWings.release(landed);s.nativeWings.release(landed);s.logical.reset();s.continuousRate=0;s.bound=false;s.wingGraphs.store(nullptr);
+    clearTemporaryWing(s);
     {std::lock_guard guard(s.spellAimLock);s.spellAim={};}
     releaseMovementControl(s,a);
     s.combatSession={};s.combatSpacing={};s.rangedRetreat={};s.combatAction=aerial::CombatAction::follow;s.combatTarget={};s.combatStyle=aerial::CombatStyle::unknown;
     s.combatReady=s.combatFleeing=s.flightWanted=false;s.combatSampleAge=.1f;s.combatItem=0;
     s.combatEvidenceReason="not sampled";
-    s.groundRecovery.reset();s.recoveryAge=landed?2.2f:0;s.landingBrake={};s.landingLogs=0;s.hadPosition=false;
+    s.groundRecovery.reset();s.recoveryAge=landed&&!temporary?2.2f:0;s.landingBrake={};s.landingLogs=0;s.hadPosition=false;
     releaseActorLowerBody(s.body.get());
     if(a&&s.graphSprint){a->SetGraphVariableInt("iSyncSprintState",0);flightEvent(a,s.lordBody.load()?"sprintStop":"SprintStop");}
     if(a)a->SetGraphVariableBool("IsSprinting",a->AsActorState()->IsSprinting());
@@ -561,10 +662,10 @@ void stop(ActorFlight& s,RE::Actor* a,const char* reason,bool landed=false){
     if(was)SKSE::log::debug("NPC flight ended: actor={:08X} reason={}",a?a->GetFormID():0,reason);
 }
 void bindContinuous(ActorFlight& s,WingMatch match){
-    if(!match.effect||!match.effect->hitEffects)return;
+    if(!match.effect&&!match.runtimeArt)return;
     auto graphs=std::make_shared<ActorFlight::WingGraphs>();
-    for(const auto effect:*match.effect->hitEffects)if(effect&&!effect->finished&&effect->GetType()==RE::TEMP_EFFECT_TYPE::kRefModel){
-        auto model=static_cast<RE::ModelReferenceEffect*>(effect);RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
+    for(const auto& owned:wingModels(match)){
+        auto model=owned.get();RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
         if(!model->GetAttached()||!model->Get3D()||!model->GetAnimationGraphManager(manager)||!manager)continue;
         {RE::BSSpinLockGuard guard(manager->GetRuntimeData().updateLock);for(const auto& g:manager->graphs)if(g)graphs->push_back(g);}
         model->NotifyAnimationGraph("JumpStandingStart");
@@ -635,7 +736,19 @@ void probe(ActorFlight& s,RE::Actor* a,Vec3 at,float dt){
 }
 void update(ActorFlight& s,RE::Actor* a,float dt){
     if(!movableNPC(a)){stop(s,a,"actor unavailable for flight movement");return;}
-    const auto match=providers->find(a,s.motion.active());
+    const auto clock=simulationTick.load();
+    const float temporaryDelta=dt==0&&clock?std::bit_cast<float>(static_cast<std::uint32_t>(clock)):dt;
+    const float temporaryStep=std::isfinite(temporaryDelta)&&temporaryDelta>0?std::min(temporaryDelta,.15f):0;
+    if(!suspended.load())s.temporaryWingRetry=std::max(0.f,s.temporaryWingRetry-temporaryStep);
+    auto match=providers->find(a,s.motion.active());
+    if(match.profile&&s.temporaryWing&&s.motion.active()){
+        // A new equipped/active wing source takes priority, but do not drop
+        // movement ownership in midair merely to swap visual providers.
+        s.temporaryWingRetiring=true;match={};
+    }
+    if(!match.profile)match=temporaryWingMatch(s,a,temporaryStep);
+    else if(s.temporaryWing&&!s.bound)clearTemporaryWing(s);
+    if(!match.profile&&s.temporaryWingPending)return;
     if(!match.profile){stop(s,a,"no supported visible wings");return;}
     const auto c=a->GetCharController();
     if(s.bound&&registeredWing(s.profile)&&registeredWing(match.profile)&&s.profile!=match.profile
@@ -861,14 +974,14 @@ void update(ActorFlight& s,RE::Actor* a,float dt){
         s.motion.limitLandingImpact();v=s.motion.velocity();
     }
     if(!match.profile->continuousFlight){
-        auto play=[&](RE::BGSSoundDescriptorForm* descriptor,bool due,float volume=1.f){
-            if(!descriptor||!due||volume<=0)return;auto audio=RE::BSAudioManager::GetSingleton();RE::BSSoundHandle handle;
-            if(audio&&audio->GetSoundHandle(handle,descriptor)){handle.SetPosition(a->GetPosition());handle.SetObjectToFollow(a->Get3D(false));handle.SetVolume(volume);handle.Play();}
+        auto play=[&](RE::BGSSoundDescriptorForm* descriptor,const auto& files,bool due,std::uint32_t output,float volume=1.f){
+            if(!due||volume<=0||(!descriptor&&files.empty()))return;RE::BSSoundHandle handle;
+            if(buildWingSound(handle,descriptor,files,output)){handle.SetPosition(a->GetPosition());handle.SetObjectToFollow(a->Get3D(false));handle.SetVolume(volume);handle.Play();}
         };
-        play(s.powerSound,s.sound.update(playback.active,playback.phase,playback.flapWeight,playback.frequency,match.profile->flapSoundPhase,match.profile->timing.downstrokeEnd));
-        play(s.cruiseSound,s.fastSound.update(playback.gliding,playback.glidePhase,playback.glideWeight,playback.glideFrequency,match.profile->fastSoundPhase,1.f));
-        play(s.spreadSound,s.flutterSound.update(playback.spreadActive,playback.spreadPhase,playback.spreadWeight,playback.spreadFrequency,
-            match.profile->spreadSoundPhase1,match.profile->spreadSoundPhase2),match.profile->spreadSoundVolume*playback.spreadWeight);
+        play(s.powerSound,match.profile->flapSoundFiles,s.sound.update(playback.active,playback.phase,playback.flapWeight,playback.frequency,match.profile->flapSoundPhase,match.profile->timing.downstrokeEnd),0x1A2FF);
+        play(s.cruiseSound,match.profile->fastSoundFiles,s.fastSound.update(playback.gliding,playback.glidePhase,playback.glideWeight,playback.glideFrequency,match.profile->fastSoundPhase,1.f),0x5A28A);
+        play(s.spreadSound,match.profile->spreadSoundFiles,s.flutterSound.update(playback.spreadActive,playback.spreadPhase,playback.spreadWeight,playback.spreadFrequency,
+            match.profile->spreadSoundPhase1,match.profile->spreadSoundPhase2),0x5A28A,match.profile->spreadSoundVolume*playback.spreadWeight);
     }
     auto facing=v;const auto enemy=s.combatTarget.get();
     if(combat&&enemy)facing=aerial::subtract(position(enemy.get()),at);
@@ -981,6 +1094,11 @@ bool actorFlightActive(const RE::Actor* a){
         const auto owner=s->actor.get();if(owner.get()==a)return true;}
     return false;
 }
+std::vector<FollowerWingOption> followerWingOptions(){
+    std::lock_guard guard(temporaryChoicesLock);std::vector<FollowerWingOption> out;
+    for(const auto& choice:temporaryChoices)out.push_back(choice->option);
+    return out;
+}
 void resetActorFlight(){
     std::lock_guard guard(rosterLock);suspended=true;leaderFlying=false;simulationTick=0;
     for(auto& [id,s]:actors){std::lock_guard stateGuard(s->stateLock);const auto a=s->actor.get();stop(*s,a.get(),"session reset");}
@@ -990,6 +1108,27 @@ void resetActorFlight(){
 void initializeActorFlight(const Configuration& cfg,Wings& wings){
     settings=&cfg;providers=&wings;
     auto data=RE::TESDataHandler::GetSingleton();followerFaction=data->LookupForm<RE::TESFaction>(0x5c84e,"Skyrim.esm");
+    {
+        std::vector<std::shared_ptr<const TemporaryWingChoice>> choices;
+        for(const auto& profile:cfg.profiles){
+            if(!profile.awuCompatibility||profile.plugin!="Animated Wings Ultimate.esp"||profile.animationless||registeredWing(&profile))continue;
+            for(const auto id:profile.effectIDs){
+                if(std::any_of(choices.begin(),choices.end(),[&](const auto& c){return c->option.effectID==id;}))continue;
+                const auto effect=data->LookupForm<RE::EffectSetting>(id,profile.plugin);
+                const auto art=effect?effect->data.hitEffectArt:nullptr;
+                if(!art)continue;
+                auto choice=std::make_shared<TemporaryWingChoice>();choice->option.effectID=id;choice->art=art;
+                const char* model=art->GetModel();
+                choice->option.name=model&&*model?std::filesystem::path(model).stem().string():effect->GetName();
+                if(choice->option.name.empty())choice->option.name=fmt::format("AWU wings {:06X}",id);
+                choice->profile=profile;choice->profile.id="Temporary follower wings: "+choice->option.name;
+                choice->profile.effectIDs.clear();choice->profile.artObjectIDs.clear();choices.push_back(std::move(choice));
+            }
+        }
+        std::sort(choices.begin(),choices.end(),[](const auto& a,const auto& b){return a->option.name<b->option.name;});
+        SKSE::log::info("Optional follower wings: AutoWings={} available AWU styles={} selected={:06X}",cfg.actors.autoWings,choices.size(),cfg.actors.autoWingsEffect);
+        std::lock_guard guard(temporaryChoicesLock);temporaryChoices=std::move(choices);
+    }
     for(unsigned i=0;i<wwmTravel.size();++i)wwmTravel[i]=data->LookupForm<RE::TESPackage>(0x800+i+(i>=5?1:0),"Wayfarer.esp");
     if(const auto module=GetModuleHandleW(L"Wayfarer.dll")){
         const auto get=reinterpret_cast<WayfarerInterface*(*)(std::uint32_t)>(GetProcAddress(module,"Wayfarer_GetInterface"));
@@ -1041,8 +1180,16 @@ void updateActorFlightLeader(RE::PlayerCharacter* p,float dt,bool playerFlying,b
             if(found!=actors.end()){std::lock_guard stateGuard(found->second->stateLock);auto& state=*found->second;
                 if(state.following!=follow||state.followReason!=observation.decision.reason)
                     SKSE::log::debug("NPC follow intent: actor={:08X} follow={} reason={} package={:08X} basePackage={:08X} scene={:08X} target={:08X} owned={} relationship={} temporaryAction={} waiting={} preparingFlight={}",a->GetFormID(),follow,aerial::followReason(observation.decision.reason),observation.package,observation.basePackage,observation.scene,observation.target,observation.evidence.ownedFlight,observation.evidence.continuingRelationship,observation.evidence.temporaryAction,observation.evidence.waiting,observation.evidence.preparingFlight);
-                state.following=follow;state.followReason=observation.decision.reason;state.seen=true;return RE::BSContainer::ForEachResult::kContinue;}
-            if(!flying||!follow||!providers->find(a).profile)return RE::BSContainer::ForEachResult::kContinue;
+                state.following=follow;state.followReason=observation.decision.reason;state.seen=true;
+                if(state.temporaryWing&&providers->hasWingSource(a))state.temporaryWingRetiring=true;
+                return RE::BSContainer::ForEachResult::kContinue;}
+            if(!flying||!follow)return RE::BSContainer::ForEachResult::kContinue;
+            const bool hasWings=providers->find(a).profile!=nullptr;
+            if(!hasWings){
+                if(!aerial::mayCreateFollowerWings(settings->actors.autoWings,flying,follow,false,temporaryChoice(settings->actors.autoWingsEffect)!=nullptr)
+                    ||providers->hasWingSource(a))return RE::BSContainer::ForEachResult::kContinue;
+                bool graph{};if(!a->GetGraphVariableBool("Wingflight_IsFlying",graph))return RE::BSContainer::ForEachResult::kContinue;
+            }
             if(actors.size()>=settings->actors.maxActors){diagnostic::report("npc.flight-capacity","retain native AI for excess actors",a,{},static_cast<double>(actors.size()),settings->actors.maxActors);return RE::BSContainer::ForEachResult::kContinue;}
             auto s=std::make_shared<ActorFlight>();s->actor=a->GetHandle();s->id=id;s->following=s->seen=true;s->followReason=observation.decision.reason;s->slot=static_cast<unsigned>(actors.size());
             const auto package=a->GetCurrentPackage();s->managedIntent=package&&std::find(wwmTravel.begin(),wwmTravel.end(),package)!=wwmTravel.end();

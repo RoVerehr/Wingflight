@@ -3,9 +3,15 @@
 #include "wing_blend.hpp"
 #include "diagnostics.hpp"
 #include <array>
+#include <cstdint>
 #include <limits>
 
 namespace wingflight::visual {
+// PlayerUpdate can advance the visual clock after native pose evaluation.
+// A frame-end consumer may reuse that immediately preceding computed pose.
+inline bool finalPoseFresh(std::uint64_t tick,std::uint64_t applied){
+    return applied<=tick&&tick-applied<=1;
+}
 struct Clock {
     float phase{}, duration{1}, rate{1};
     bool resetHidden(float weight,float start=0) {

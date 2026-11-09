@@ -1,4 +1,5 @@
 #include "lower_body.hpp"
+#include "wing_appearance.hpp"
 #include "actor_state.hpp"
 #include "logging.hpp"
 #include "lower_body_policy.hpp"
@@ -342,6 +343,7 @@ void apply(RE::NiAVObject* object,RE::NiUpdateData* data){
 }
 struct ThirdPersonUpdate {
     static void thunk(RE::NiAVObject* object,RE::NiUpdateData* data){
+        WingAppearancePass appearance(object,data);
         applyActorLegs(object,data);applyVampireWings(object);applyRegisteredWingPoses(object,data);apply(object,data);original(object,data);applyRegisteredWingPoses(object,data,true);observeActorLegs(object);
         // Confirm that the native scene update did not immediately overwrite the
         // eight rotations. This is diagnostic only, never a second pose write.
@@ -401,6 +403,7 @@ void refreshActorLegWorld(ActorLegs& s,RE::NiUpdateData& data){
 }
 template<unsigned Slot,bool Flattened>struct ActorBonePass {
     static void thunk(RE::NiNode* node,RE::NiUpdateData& data,std::uint32_t flags){
+        WingAppearancePass appearance(node,&data);
         original(node,data,flags);
         applyVampireWings(node,&data,true);
         applyRegisteredWingPoses(node,&data,true);

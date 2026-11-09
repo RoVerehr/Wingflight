@@ -50,9 +50,23 @@ private:bool catchingUp_{};float boost_{},hold_{},age_{},fadeStart_{};
 struct Settings {
     bool enabled{true};
     unsigned maxActors{32};
-    float followDistance{200}; // Skyrim units; conversion belongs to the adapter.
+    float followDistance{500}; // Skyrim units; conversion belongs to the adapter.
     bool airCombat{true};
+    bool autoWings{false};
+    std::uint32_t autoWingsEffect{0x89A};
 };
+// An existing provider always wins. A leased temporary model remains available
+// during landing even after the option or leader flight turns off.
+inline bool mayCreateFollowerWings(bool enabled,bool leaderFlying,bool following,bool hasWings,bool available) {
+    return enabled&&leaderFlying&&following&&!hasWings&&available;
+}
+inline bool keepFollowerWings(bool requested,bool moving,bool following,bool leaderFlying) {
+    return moving||(requested&&following&&leaderFlying);
+}
+inline float temporaryWingExpiry(float age) {
+    const float expiry=age+3.f;
+    return std::isfinite(age)&&age>=0&&std::isfinite(expiry)&&expiry>age?expiry:0.f;
+}
 inline Vec3 add(Vec3 a,Vec3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
 inline Vec3 subtract(Vec3 a,Vec3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 inline Vec3 multiply(Vec3 a,float s){return {a.x*s,a.y*s,a.z*s};}

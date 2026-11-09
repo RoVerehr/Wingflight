@@ -1,3 +1,4 @@
+#include "wing_models.hpp"
 #include "held_wings.hpp"
 #include "held_wing_policy.hpp"
 #include "effect_owner.hpp"
@@ -16,7 +17,7 @@ namespace {
 struct Entry {
     RE::NiPointer<RE::ModelReferenceEffect> model;
     std::array<RE::BSTSmartPointer<RE::BShkbAnimationGraph>,8> graphs{};
-    bool managed{},open{},swimming{};float retry{};unsigned attempts{};
+    bool managed{},open{},swimming{},sneaking{},awuEvents{true};float retry{};unsigned attempts{};
     HeldWingLanding landing;
 };
 std::mutex eventMutex;
@@ -30,11 +31,11 @@ struct WingEvents {
     // Preserve this borrowed event pointer; do not copy/refcount its payload.
     static void thunk(RE::hkbStateMachine* self,const RE::hkbContext& context,const RE::hkbEvent* event){
         if(!anyManaged.load(std::memory_order_acquire)){original(self,context,event);return;}
-        bool managed=false,open=false,swimming=false;
+        bool managed=false,open=false,swimming=false,sneaking=false,awuEvents=true;
         if(event&&self->name.c_str()&&std::string_view(self->name.c_str())=="HandCastingFXBehavior"){
             std::lock_guard lock(eventMutex);
             for(const auto& [model,entry]:entries)for(const auto& graph:entry.graphs)
-                if(graph && &graph->characterInstance==context.character){managed=entry.managed;open=entry.open;swimming=entry.swimming;break;}
+                if(graph && &graph->characterInstance==context.character){managed=entry.managed;open=entry.open;swimming=entry.swimming;sneaking=entry.sneaking;awuEvents=entry.awuEvents;break;}
         }
         if(managed&&context.behavior&&context.behavior->data&&context.behavior->data->stringData){
             const auto& names=context.behavior->data->stringData->eventNames;
@@ -43,7 +44,7 @@ struct WingEvents {
             if(names.size()<=256)for(std::int32_t i=0;i<names.size();++i){
                 const auto id=map?(i<map->internalToExternalMap.size()?map->internalToExternalMap[i]:-1):i;
                 if(id!=external||!names[i].c_str())continue;
-                if(heldWingBlocks(names[i].c_str(),true,open,swimming))return;
+                if(sneaking?sneakWingBlocks(names[i].c_str()):heldWingBlocks(names[i].c_str(),true,open,swimming,awuEvents))return;
                 break;
             }
         }
@@ -86,7 +87,7 @@ void installHeldWingEvents(){
     SKSE::log::info("AWU held-jump wings revision=swim-jump-gate-1: airborne jump/fall ART control; swimming blocks jump opening only, native swim/body events unchanged, original target={:X}",destination);
 }
 void resetHeldWings(){anyManaged.store(false,std::memory_order_release);std::lock_guard lock(eventMutex);entries.clear();intent.reset();samples=0;}
-void landHeldWings(float dt){
+void landHeldWings(float dt,bool restoreSneak){
     // Publish release BEFORE sending MTState; never filter our own cleanup.
     anyManaged.store(false,std::memory_order_release);intent.reset();
     std::array<RE::NiPointer<RE::ModelReferenceEffect>,16> models{};unsigned count{};
@@ -102,37 +103,42 @@ void landHeldWings(float dt){
         auto model=models[i].get();
         const bool valid=model&&!model->finished&&model->GetAttached()&&model->Get3D();
         const int state=valid?wingState(model):-2;
-        HeldWingLanding::Result result;
+        HeldWingLanding::Result result;bool awuEvents=true;
         {
             std::lock_guard lock(eventMutex);const auto it=entries.find(model);if(it==entries.end())continue;
-            result=it->second.landing.update(dt,state);
+            awuEvents=it->second.awuEvents;result=it->second.landing.update(dt,state,it->second.sneaking,restoreSneak&&it->second.sneaking);
             if(!result.pending)entries.erase(it);
         }
+        if(result.sendSneak)model->NotifyAnimationGraph("SneakStart");
         if(result.sendFold){
-            const bool accepted=model->NotifyAnimationGraph("MTState");
-            SKSE::log::debug("AWU held-wing landing handoff: state={} event=MTState accepted={}; native events released",state,accepted);
+            const auto command=state==14?"SneakStop":(awuEvents?"MTState":"JumpLandEnd");
+            const bool accepted=model->NotifyAnimationGraph(command);
+            SKSE::log::debug("Held-wing landing handoff: state={} event={} accepted={}; native events released",state,command,accepted);
         }
     }
 }
 bool heldWingGateInstalled(){return installed;}
-void updateHeldWings(WingMatch match,float dt,bool held,bool airborne,bool fullFlight,bool glide,bool suspended,float threshold,bool enabled,bool jumpPending){
-    if(!enabled||!installed||!heldWingsEligible(match.profile)||match.owner!=RE::PlayerCharacter::GetSingleton()
-        ||!wingEventActor(match.owner,match.effect)||!match.effect->hitEffects){resetHeldWings();return;}
+void updateHeldWings(WingMatch match,float dt,bool held,bool airborne,bool fullFlight,bool glide,bool suspended,float threshold,bool enabled,bool jumpPending,bool foldSneaking,bool sneakPending){
+    if(!installed||!heldWingsEligible(match.profile)||match.owner!=RE::PlayerCharacter::GetSingleton()
+        ||!wingEventActor(match.owner,match.effect)){resetHeldWings();return;}
     const bool swimming=match.owner->AsActorState()->IsSwimming();
-    if(swimming)intent.reset();
-    const bool open=!swimming&&intent.update(dt,held,airborne,fullFlight,glide,suspended,threshold);
+    const bool sneaking=match.profile->awuCompatibility&&sneakWingManaged(foldSneaking,
+        match.owner->AsActorState()->IsSneaking(),airborne,fullFlight,glide,swimming,jumpPending,sneakPending);
+    if(swimming||sneaking||!enabled)intent.reset();
+    const bool open=enabled&&!swimming&&!sneaking&&intent.update(dt,held,airborne,fullFlight,glide,suspended,threshold);
     // During menu suspension keep the last gate and do not issue new commands.
     if(suspended)return;
-    const bool managed=heldWingManaged(enabled,fullFlight,airborne,jumpPending,swimming);
-    if(!managed&&!airborne&&!fullFlight){landHeldWings(dt);return;}
+    const bool managed=sneaking||heldWingManaged(enabled,fullFlight,airborne,jumpPending,swimming);
+    if(!managed&&!airborne&&!fullFlight&&!swimming){
+        landHeldWings(dt,!foldSneaking&&match.owner->AsActorState()->IsSneaking());return;
+    }
     if(!managed){
         anyManaged.store(false,std::memory_order_release);
         std::lock_guard lock(eventMutex);entries.clear();return;
     }
     std::array<RE::NiPointer<RE::ModelReferenceEffect>,16> models{};unsigned count=0;
-    for(auto effect:*match.effect->hitEffects){
-        if(!effect||effect->finished||effect->GetType()!=RE::TEMP_EFFECT_TYPE::kRefModel)continue;
-        auto model=static_cast<RE::ModelReferenceEffect*>(effect);
+    for(const auto& owned:wingModels(match)){
+        auto model=owned.get();
         if(!model->GetAttached()||!model->Get3D())continue;
         if(count==models.size()){diagnostic::report("held-wings.model-limit","manage first 16 wing models",match.owner);break;}
         models[count++].reset(model);
@@ -143,8 +149,8 @@ void updateHeldWings(WingMatch match,float dt,bool held,bool airborne,bool fullF
         for(unsigned i=0;i<count;++i){
             auto& entry=entries[models[i].get()];
             if(!entry.model)entry.model=models[i];
-            if(entry.managed!=managed||entry.open!=open||entry.swimming!=swimming){entry.retry=0;entry.attempts=0;}
-            entry.managed=managed;entry.open=open;entry.swimming=swimming;
+            if(entry.managed!=managed||entry.open!=open||entry.swimming!=swimming||entry.sneaking!=sneaking){entry.retry=0;entry.attempts=0;}
+            entry.managed=managed;entry.open=open;entry.swimming=swimming;entry.sneaking=sneaking;entry.awuEvents=match.profile->awuCompatibility;
             entry.retry=std::max(0.f,entry.retry-std::clamp(dt,0.f,.1f));
         }
     }
@@ -163,7 +169,7 @@ void updateHeldWings(WingMatch match,float dt,bool held,bool airborne,bool fullF
     if(!managed||swimming)return; // Do not sample states or issue wing commands in water.
     for(unsigned i=0;i<count;++i){
         const auto model=models[i].get();const int state=wingState(model);
-        const auto command=heldWingCommand(state,open,swimming);
+        const auto command=sneaking?sneakWingCommand(state):heldWingCommand(state,open,swimming,match.profile->awuCompatibility);
         bool send=false;{
             std::lock_guard lock(eventMutex);auto& entry=entries.at(model);
             if(!command){if((open&&state==8)||(!open&&state==2))entry.attempts=0;continue;}

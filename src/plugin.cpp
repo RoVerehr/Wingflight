@@ -9,6 +9,7 @@
 #include "config.hpp"
 #include "flight_save.hpp"
 #include "wings.hpp"
+#include "wing_appearance.hpp"
 #include "continuous_wing_rate.hpp"
 #include "vampire_runtime.hpp"
 #include "vampire_policy.hpp"
@@ -30,6 +31,7 @@
 #include "settings_file.hpp"
 #include "live_settings.hpp"
 #include "runtime_support.hpp"
+#include "sprint_fall_guard.hpp"
 #include "gravity_lease.hpp"
 #include "flight_foot_ik.hpp"
 #include "controller_support.hpp"
@@ -40,6 +42,7 @@
 #include "diagnostics.hpp"
 #include "flight_collision.hpp"
 #include "held_wings.hpp"
+#include "wing_models.hpp"
 #include "jump_wing_preview.hpp"
 #include "actor_flight.hpp"
 #include "logging.hpp"
@@ -55,6 +58,10 @@ vampire::BatTravel nativeBatTravel;
 bool nativeTravelWasPaused{};
 unsigned nativeBatVelocitySamples{};
 std::atomic_bool tweenHandoffPending{},flightMenuSuspended{};
+std::atomic_bool sceneLoadRequested{},sceneLoading{};
+RE::TESGlobal* worldTransitionInProgress{};
+bool sceneFlightPending{};
+float sceneFlightWait{};
 struct OwnedGravity {
     RE::NiPointer<RE::bhkCharacterController> controller;
     GravityLease lease;
@@ -169,11 +176,19 @@ bool uiMenuOpen() {
         || ui->IsModalMenuOpen() || ui->IsMenuOpen(RE::Console::MENU_NAME)
         || ui->IsMenuOpen(RE::TweenMenu::MENU_NAME);
 }
-bool menuOpen(){return uiMenuOpen()||flightMenuSuspended.load()||tweenHandoffPending.load();}
+bool worldPaused(){
+    const auto ui=RE::UI::GetSingleton();const auto main=RE::Main::GetSingleton();
+    return !ui||worldSimulationPaused(ui->GameIsPaused(),main&&main->GetRuntimeData().freezeTime);
+}
+bool menuOpen(){return worldPaused()||flightMenuSuspended.load()||tweenHandoffPending.load();}
 struct FlightMenuEvents : RE::BSTEventSink<RE::MenuOpenCloseEvent> {
     RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* event,RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override {
         // UI events still run while the paused player receives no updates.
         if(event&&event->menuName==RE::TweenMenu::MENU_NAME)tweenHandoffPending=true;
+        if(event&&event->menuName==RE::LoadingMenu::MENU_NAME){
+            sceneLoading=event->opening;
+            if(event->opening&&ready&&loaded&&flight.flying())sceneLoadRequested=true;
+        }
         return RE::BSEventNotifyControl::kContinue;
     }
 } flightMenuEvents;
@@ -201,7 +216,7 @@ void discardExternalFlightInput(){
 struct InputEvents : RE::BSTEventSink<RE::InputEvent*> {
     RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* events, RE::BSTEventSource<RE::InputEvent*>*) override {
         if (!ready || !loaded || !events) { return RE::BSEventNotifyControl::kContinue; }
-        if (menuOpen()) { clearInput(); return RE::BSEventNotifyControl::kContinue; }
+        if (worldPaused()) { clearInput(); return RE::BSEventNotifyControl::kContinue; }
         std::lock_guard lock(inputMutex);
         for (auto event = *events; event; event = event->next) {
             if (const auto axis = event->AsThumbstickEvent()) {
@@ -271,6 +286,11 @@ bool usable(RE::PlayerCharacter* player) {
         && !player->AsActorState()->IsBleedingOut() && player->AsActorState()->GetKnockState() == RE::KNOCK_STATE_ENUM::kNormal
         && player->AsActorState()->GetSitSleepState() == RE::SIT_SLEEP_STATE::kNormal;
 }
+bool ownedSprintFallCheck(RE::Actor* actor){
+    const auto player=RE::PlayerCharacter::GetSingleton();
+    return ready&&loaded&&actor==player&&flight.flying()&&!nativeBatTravel.yielding()
+        &&actorGraphSafe(player)&&usable(player)&&player->GetCharController()==flightController;
+}
 // Temporary control/camera locks from scenes, camera or animation mods. Flight
 // is held in place rather than ended; new flight still waits for them to clear.
 bool controlsAvailable() {
@@ -287,7 +307,8 @@ void updateMenuPause(float delta) {
         &&(camera->currentState->id==RE::CameraStates::kTween||camera->currentState->id==RE::CameraStates::kPCTransition);
     const bool gameplayReady=controls&&controls->IsMovementControlsEnabled()&&camera
         &&(camera->IsInFirstPerson()||camera->IsInThirdPerson());
-    const bool suspended=menuFlightPause.update(delta,ready&&loaded&&flight.active(),uiMenuOpen(),transition,gameplayReady);
+    const bool suspended=menuFlightPause.update(delta,ready&&loaded&&flight.active(),worldPaused(),transition,gameplayReady,
+        uiMenuOpen()&&!worldPaused());
     const bool previous=flightMenuSuspended.exchange(suspended);
     if(previous!=suspended&&flight.active())
         SKSE::log::debug("Flight menu handoff: suspended={} camera={} movementEnabled={}",suspended,
@@ -494,6 +515,10 @@ const char* modeName(Mode mode) {
 void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool glideOnly=false) {
     // Recheck at entry: a provider may activate after input collection.
     if(currentExternalFlight(player)!=ExternalFlightOwner::none){discardExternalFlightInput();return;}
+    if(!flightLoadAllowed(config.tuning,player->IsOverEncumbered())){
+        if(!glideOnly)RE::SendHUDMessage::ShowHUDMessage("Wingflight: too encumbered to fly");
+        return;
+    }
     flightCollision.reset();
     if(!wings.prepareVisual(match).found){
         SKSE::log::error("Flight blocked: original wing resources could not be bound by the runtime driver");
@@ -582,8 +607,59 @@ void start(RE::PlayerCharacter* player, WingMatch match, bool restoring,bool gli
     if(!glideOnly)RE::SendHUDMessage::ShowHUDMessage(flight.continuousFlight()?"Wingflight: continuous flight":modeName(flight.mode()));
     SKSE::log::debug("Flight started adapter={} restored={} glideOnly={} runtime={} body={} wingBackend={} continuousFlight={}", lastProfile, restoring,glideOnly,runtimeName(),usesVampireLordBehavior(player)?"VampireLord":"Character",match.profile->animationless?"logical invisible":match.profile->continuousFlight?"provider loop":match.profile->nativeVampire?"skeletal":"effect ART",flight.continuousFlight());
 }
+// Returns true while native loading/transition code must retain control.
+// Save loading uses resetSession and never enters through this live-flight path.
+bool sceneFlightHandoff(RE::PlayerCharacter* player,float delta){
+    if(!flight.flying()){sceneFlightPending=false;sceneLoadRequested=false;sceneFlightWait=0;return false;}
+    const auto cell=player->GetParentCell();
+    const bool changed=cell&&lastCell&&(lastWorld!=player->GetWorldspace()
+        ||(cell!=lastCell&&(lastInterior||cell->IsInteriorCell())));
+    const bool providerBusy=worldTransitionInProgress&&worldTransitionInProgress->value>0;
+    const bool requested=sceneLoadRequested.exchange(false);
+    if((requested||changed||providerBusy)&&!sceneFlightPending){
+        sceneFlightPending=true;sceneFlightWait=0;flightCollision.reset();clearInput();
+        SKSE::log::debug("Flight scene handoff pending: loading={} worldChanged={} providerBusy={}",requested,changed,providerBusy);
+    }
+    if(!sceneFlightPending)return false;
+    if(sceneLoading.load()||worldPaused())return true;
+    if(std::isfinite(delta)&&delta>0)sceneFlightWait+=std::min(delta,.1f);
+    if(sceneFlightWait>15.f){
+        sceneFlightPending=false;finish(player,{},"scene handoff timed out");return false;
+    }
+    if(providerBusy||!actorGraphSafe(player)||!cell||!player->GetCharController())return true;
+    if(!usable(player)||(flightRace&&player->GetRace()&&flightRace!=player->GetRace()->GetFormID())
+        ||currentExternalFlight(player)!=ExternalFlightOwner::none){
+        sceneFlightPending=false;finish(player,{},"scene destination no longer eligible");return false;
+    }
+    if(!controlsAvailable())return true;
+    const auto controller=player->GetCharController();
+    // Check actual nearby geometry; a newly constructed proxy may still carry
+    // its default Supported flag even at the airborne destination.
+    const auto floor=groundDistanceBelow(controller,player->GetPosition());
+    if(physicalSupported(controller)&&std::isfinite(floor)&&floor<=.08f){
+        sceneFlightPending=false;finish(player,{},"scene destination grounded");return false;
+    }
+    auto match=wings.find(player,true);bool graph{};
+    if(!match.profile||!player->GetGraphVariableBool("Wingflight_IsFlying",graph))return true;
+    // Drop old model references before binding the destination. Preserve only
+    // the live flight's mode, never its old hover coordinates or velocity.
+    wings.clearVisual(false);resetWingModelCache();
+    if(!wings.prepareVisual(match).found)return true;
+    const float height=player->GetPosition().z/RE::bhkWorld::GetWorldScaleInverse();
+    if(!flight.resumeAfterNativeTravel(height))return true;
+    ownedGravity.release();flightController=controller;ownedGravity.apply(controller);
+    controllerSupport.reset(false);controllerSupport.replaced();
+    clearFall(controller);controller->SetLinearVelocityImpl(RE::hkVector4(0,0,0,0));
+    lastCell=cell;lastWorld=player->GetWorldspace();lastPosition=player->GetPosition();lastInterior=cell->IsInteriorCell();
+    visualActorRoot=nullptr;lastProfile.clear();visualEffect=nullptr;
+    flightCollision.reset();wingMotion.reset();wingEntry.reset();ceilingTimer=0;bodyRetry=.25f;
+    publish(player,true);clearInput();sceneFlightPending=false;sceneFlightWait=0;
+    SKSE::log::debug("Flight scene handoff resumed at destination: mode={} Z={:.2f}",static_cast<int>(flight.mode()),player->GetPosition().z);
+    return false;
+}
 void update(RE::PlayerCharacter* player, float delta) {
     if (!ready || !loaded || !player) { return; }
+    if(sceneFlightHandoff(player,0))return;
     if (!actorGraphSafe(player)) {
         jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
         if (flight.active()) { finish(player, {}, (unsafeActorReason(player)+"; no controller/graph writes").c_str()); }
@@ -628,6 +704,9 @@ void update(RE::PlayerCharacter* player, float delta) {
     if (menuOpen()) {
         flightCollision.reset();
         clearInput();
+        // Preserve the camera handoff position hold, but not a visual freeze
+        // when the world is still running.
+        if(!worldPaused()&&std::isfinite(delta)&&delta>0)wings.advanceVisual(std::min(delta,.1f));
         if (wasActive && player->GetCharController() && match.profile && !player->IsDead()
             && !player->AsActorState()->IsSwimming() && !player->IsOnMount()
             && RE::UI::GetSingleton() && !RE::UI::GetSingleton()->GameIsPaused() && !nativeBatTravel.yielding()) {
@@ -660,7 +739,9 @@ void update(RE::PlayerCharacter* player, float delta) {
         clearInput(); return;
     }
     static bool controlLockHeld{};
-    if(!controlsAvailable()&&!safeTravelActor){
+    const auto menuCamera=RE::PlayerCamera::GetSingleton();
+    const bool unpausedMenuFlight=wasActive&&uiMenuOpen()&&!worldPaused()&&menuCamera;
+    if(!controlsAvailable()&&!safeTravelActor&&!unpausedMenuFlight){
         // A scene, camera or animation mod owns the controls: hold position, as
         // menus do, instead of dropping the player out of the sky.
         if(wasActive){
@@ -731,7 +812,8 @@ void update(RE::PlayerCharacter* player, float delta) {
         if(!providerLoop)flight.restoreMode(preferredFlightMode);
     }
     if(providerLoop&&flight.flying())controls.cycle=controls.flap=false;
-    controls.yaw = cameraYaw(player);
+    controls.yaw = unpausedMenuFlight&&menuCamera&&!menuCamera->IsInFirstPerson()&&!menuCamera->IsInThirdPerson()
+        ?player->GetAngleZ():cameraYaw(player);
     const bool sprintHeld=controls.sprint;
     controls.sprint=flightSprintAllowed(player->AsActorState()->IsSprinting(),armedSprintForbidden(player));
     controls.pitch=player->GetAngleX();
@@ -766,7 +848,10 @@ void update(RE::PlayerCharacter* player, float delta) {
         const float preview=jumpWingPreview.update(dt,airborne,previewEligible,config.jumpWingOpenPercent,
             config.jumpWingOverOpenPercent,config.jumpWingOpenSeconds,config.jumpWingSettleSeconds);
         if(preview>0&&previewEligible){
-            if(wings.setJumpPreview(match,preview,config.jumpWingFlutterPeriod,config.jumpWingFlutterAmplitude)){jumpPreviewOwned=true;jumpPreviewEffect=match.effect;}
+            if(wings.setJumpPreview(match,preview,config.jumpWingFlutterPeriod,config.jumpWingFlutterAmplitude)){
+                jumpPreviewOwned=true;jumpPreviewEffect=match.effect;
+                if(jumpWingPreview.takeOpeningSound())wings.playJumpOpeningSound(match);
+            }
         }else if(jumpPreviewOwned){wings.clearVisual(false);jumpPreviewOwned=false;jumpPreviewEffect=nullptr;}
         flightFacing.release();return;
     }
@@ -812,6 +897,7 @@ void update(RE::PlayerCharacter* player, float delta) {
         hoverPlayback.flapWeight,match.profile->timing.downstrokeEnd,
         wingMotion.automaticLead(hoverTiming,hoverPlayback.phase),hoverTiming.downstrokeSeconds,wingMotion.pending()>0,
         wingMotion.reservedCost(true,cancelAutomatic),wingMotion.reservedCost(false,cancelAutomatic)};
+    observation.overencumbered=!config.tuning.allowOverencumberedFlight&&player->IsOverEncumbered();
     if(flight.normalGroundHover())observation.groundDistance=groundDistanceBelow(controller,position);
     const bool fullFlightBeforeTick=flight.flying();
     const auto result = flight.tick(dt, controls, observation, flightTuning);
@@ -821,7 +907,9 @@ void update(RE::PlayerCharacter* player, float delta) {
         finish(player,match,"manual exit: native free fall and AWU falling wings",!supported(controller),fullFlightBeforeTick);
         return; // No velocity, fall-time or fall-height writes after releasing.
     }
-    if (result.landed || result.aborted) { airInput.cancel(controls.up);finish(player, match, result.landed ? "ground contact" : "eligibility lost",false,fullFlightBeforeTick); return; }
+    if (result.landed || result.aborted) { airInput.cancel(controls.up);finish(player, match,
+        result.landed ? "ground contact" : observation.overencumbered ? "overencumbered" : "eligibility lost",
+        false,fullFlightBeforeTick); return; }
     if (previousMode != flight.mode()) {
         if(controls.cycle && flight.flying()&&!flight.continuousFlight())preferredFlightMode=flight.mode();
         RE::SendHUDMessage::ShowHUDMessage(modeName(flight.mode()));
@@ -964,8 +1052,7 @@ void update(RE::PlayerCharacter* player, float delta) {
     }
     auto target = flight.velocity();
     if(flight.glideOnly()){
-        target=observedVelocity;
-        target.z=std::max(target.z,-config.tuning.glideFall);
+        target=flight.limitGlideVelocity(observedVelocity);
     }
     const bool armed=player->AsActorState()->IsWeaponDrawn();
     const float requestedForward=controls.forward*(flight.highSpeed()?std::cos(controls.pitch):1.0f);
@@ -1010,6 +1097,15 @@ void update(RE::PlayerCharacter* player, float delta) {
 }
 struct PlayerUpdate {
     static void thunk(RE::PlayerCharacter* actor, float delta) {
+        if(ready&&loaded&&actorGraphSafe(actor)){
+            refreshVampireContext(actor);
+            updateWingAppearance(actor,wings.find(actor,true,true),config.wingAppearance,flight.active(),worldPaused()?0:delta);
+        }else resetWingAppearance();
+        if(ready&&loaded&&sceneFlightHandoff(actor,delta)){
+            original(actor,delta);
+            updateActorFlightLeader(actor,delta,true,true,std::numeric_limits<float>::quiet_NaN(),false);
+            return;
+        }
         nativeBatTravel.beginFrame(delta,ready&&loaded&&flight.flying()&&usesVampireLordBehavior(actor),nativeBatAnimationDriven(actor));
         if(nativeBatTravel.timedOut())SKSE::log::warn("Native Vampire Lord bat travel: no stop event within {:.1f}s; returning control to flight",vampire::BatTravel::limit);
         pauseVampireWingOverlay(nativeBatTravel.yielding());
@@ -1022,7 +1118,7 @@ struct PlayerUpdate {
             const auto match=wings.find(actor,flight.active());
             const auto controller=actor->GetCharController();
             updateHeldWings(match,delta,jumpHeld(),!supported(controller),flight.flying(),flight.glideOnly(),menuOpen(),config.glideHoldSeconds,
-                config.controlJumpWingAnimations,groundJumpRequested.load()||jumpWingPreview.pending());
+                config.controlJumpWingAnimations,groundJumpRequested.load()||jumpWingPreview.pending(),config.foldWingsWhileSneaking);
         }else resetHeldWings();
         if(ready&&loaded&&actorGraphSafe(actor))
             updateFlightBreath(actor,flight.flying()&&actor->GetCharController()==flightController
@@ -1243,7 +1339,7 @@ struct PlayerFootstepFilter {
 };
 struct JumpFilter {
     static bool thunk(RE::JumpHandler* handler, RE::InputEvent* event) {
-        if (ready && loaded && !menuOpen() && event) {
+        if (ready && loaded && !worldPaused() && event) {
             const auto button = event->AsButtonEvent();
             if (button && std::string_view(button->QUserEvent().c_str()) == "Jump") {
                 // Preserve the active provider's handler chain, including key-up.
@@ -1256,7 +1352,8 @@ struct JumpFilter {
                 // Claim the initiating air press BEFORE the native jump handler
                 // can pass it to Better Jumping's jump/coyote hooks. Ground input
                 // and an ineligible actor always keep the original handler chain.
-                if (button->IsDown() && airborne && usable(player) && controlsAvailable()) {
+                if (button->IsDown() && airborne && usable(player) && controlsAvailable()
+                    &&flightLoadAllowed(config.tuning,player->IsOverEncumbered())) {
                     bool graph{};
                     const auto match = wings.find(player);
                     if (claimJumpForFlight(false, true, airborne, match.profile != nullptr, true,
@@ -1271,7 +1368,7 @@ struct JumpFilter {
             }
         }
         const bool accepted=original(handler,event);
-        if(accepted&&ready&&loaded&&event){
+        if(accepted&&ready&&loaded&&event&&!worldPaused()){
             const auto b=event->AsButtonEvent();const auto p=RE::PlayerCharacter::GetSingleton();
             if(b&&b->IsDown()&&std::string_view(b->QUserEvent().c_str())=="Jump"&&usable(p)&&controlsAvailable()
                 &&supported(p->GetCharController())){
@@ -1292,7 +1389,7 @@ struct JumpFilter {
 };
 struct SneakFilter {
     static bool thunk(RE::SneakHandler* handler, RE::InputEvent* event) {
-        if (flight.active() && !menuOpen() && event) {
+        if (flight.active() && !worldPaused() && event) {
             if (const auto button = event->AsButtonEvent()) {
                 const auto id = button->device==RE::INPUT_DEVICE::kGamepad
                     ?canonicalGamepadButton(button->GetIDCode()):button->GetIDCode();
@@ -1302,7 +1399,20 @@ struct SneakFilter {
                         && ((config.padDescend != 0 && id == config.padDescend) || (config.padLand != 0 && id == config.padLand)))) { return false; }
             }
         }
-        return original(handler, event);
+        const bool accepted=original(handler,event);
+        if(accepted&&ready&&loaded&&config.foldWingsWhileSneaking&&!flight.active()&&event&&!worldPaused()){
+            const auto button=event->AsButtonEvent();
+            const auto player=RE::PlayerCharacter::GetSingleton();
+            if(button&&button->IsDown()&&button->QUserEvent()=="Sneak"&&usable(player)&&controlsAvailable()
+                &&!player->AsActorState()->IsSneaking()&&supported(player->GetCharController())
+                &&currentExternalFlight(player)==ExternalFlightOwner::none){
+                // CanProcess accepted the press; native ProcessButton has not
+                // sent SneakStart yet. Register the wing-only gate first.
+                updateHeldWings(wings.find(player),0,false,false,false,false,false,config.glideHoldSeconds,
+                    config.controlJumpWingAnimations,groundJumpRequested.load(),true,true);
+            }
+        }
+        return accepted;
     }
     static inline REL::Relocation<decltype(thunk)> original;
 };
@@ -1314,6 +1424,9 @@ void load(SKSE::SerializationInterface* serialization) {
     resumeMode=state.resumeMode;resumeWait=0;preferredFlightMode=state.preferredMode;
 }
 void resetSession() {
+    resetWingAppearance();
+    sceneLoadRequested=false;sceneLoading=false;sceneFlightPending=false;sceneFlightWait=0;
+    resetWingModelCache();
     flightExitWings.reset();wings.resetGroundRecovery();
     resetActorFlight();
     jumpWingPreview.reset();jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
@@ -1351,6 +1464,9 @@ void message(SKSE::MessagingInterface::Message* message) {
     case SKSE::MessagingInterface::kPostLoadGame:
         loaded = message->data != nullptr; resetGraphs = true; break;
     case SKSE::MessagingInterface::kDataLoaded: {
+        const auto sceneData=RE::TESDataHandler::GetSingleton();
+        if(sceneData&&sceneData->LookupLoadedModByName("Worldspace Transition Tweaks - Skyrim To Solstheim.esp"))
+            worldTransitionInProgress=sceneData->LookupForm<RE::TESGlobal>(0x032C2F,"Worldspace Transition Tweaks - Skyrim To Solstheim.esp");
         registerSettingsMenu(config,[](const Configuration& candidate)->std::string {
             if(const auto error=validateLiveSettings(candidate);!error.empty())return error;
             const auto controls=RE::ControlMap::GetSingleton();
@@ -1373,20 +1489,31 @@ void message(SKSE::MessagingInterface::Message* message) {
             if(!std::isfinite(inverseScale)||inverseScale<=0)return "Physics world scale is not ready.";
             // The menu only submits a snapshot. Persistence and the complete
             // configuration commit run together on the SKSE game task thread.
-            saveLiveSettings(std::filesystem::absolute("Data/SKSE/Plugins/Wingflight.ini"),candidate);
+            saveUserSettings(candidate);
             applyLiveSettings(config,candidate,inverseScale);
             logging::configure(config.logSamples);
             if(!config.controlJumpWingAnimations){
-                resetHeldWings();jumpWingPreview.reset();
+                jumpWingPreview.reset();
                 if(jumpPreviewOwned&&!flight.active())wings.clearVisual(false);
                 jumpPreviewOwned=false;jumpPreviewEffect=nullptr;
             }
             SKSE::log::debug("NPC flight settings applied: Enabled={} FollowDistance={:.2f}; airborne actors land safely when disabled",config.actors.enabled,config.actors.followDistance);
             flightCollision.reset();
             applyLowerBodySettings(config);
+            if(const auto player=RE::PlayerCharacter::GetSingleton();ready&&loaded&&actorGraphSafe(player))
+                updateWingAppearance(player,wings.find(player,true,true),config.wingAppearance,flight.active(),0);
+            else resetWingAppearance();
             clearInput();
             airInput.cancel(false);groundJumpRequested=false;
             return {};
+        },[](const std::string& key,appearance::ProfileSettings values)->std::string {
+            const auto player=RE::PlayerCharacter::GetSingleton();
+            if(!ready||!loaded||!actorGraphSafe(player))return "The player is not ready. Equip your wings after loading a game.";
+            refreshVampireContext(player);
+            const auto match=wings.find(player,true,true);
+            const auto error=saveCurrentWingAppearance(player,match,key,values);
+            updateWingAppearance(player,match,config.wingAppearance,flight.active(),0);
+            return error;
         });
         if (!config.enabled) { SKSE::log::info("Disabled by configuration"); break; }
         externalFrameworkPresent=GetModuleHandleW(L"FlightFramework.dll")!=nullptr;
@@ -1394,6 +1521,7 @@ void message(SKSE::MessagingInterface::Message* message) {
         SKSE::log::info("External flight input guard revision=external-flight-input-1: FlightFramework present={} (FlightFramework_IsFlying); Flying Mod state available={} (P1FlyingRing.esp:00285A); installed but inactive providers do not block Wingflight",
             externalFrameworkPresent,externalFlyingToggle!=nullptr);
         flightFacing.initialize();
+        installSprintFallGuard(ownedSprintFallCheck);
         initializeAWUCompatibility(config.awuCompatibility);
         wings.resolve(config);
         initializeFlightAudio(config.muteFlightSprintBreath);
@@ -1417,13 +1545,13 @@ void message(SKSE::MessagingInterface::Message* message) {
             SKSE::log::error("Wing-art driver unavailable; AWU/MDDA flight disabled; native Vampire Lord backend readiness is independent");
             if(!vampireSceneReady())break;
         }
-        SKSE::log::info("Integrated providers revision=vlrn-auto-7-se1597; Wingflight 0.4.1; vanilla/VLrn/AWU wing support and SE 1.5.97 runtime dispatch");
+        SKSE::log::info("Integrated providers revision=vlrn-auto-7-se1597; Wingflight 0.4.5; vanilla/VLrn/AWU and custom wing support; SE 1.5.97 runtime dispatch");
         installHeldWingEvents();
         SKSE::log::info("Better Jumping detected={}; ground/ineligible jumps preserve original handler; eligible air presses belong to Wingflight",
             GetModuleHandleW(L"BetterJumpingSE.dll") != nullptr);
         initializeActorFlight(config,wings);
         ready = true;
-        SKSE::log::info("Ready. Armed idle={} DisableSprintWhenArmed={}. BFCO-independent. No attack, stamina-drain, collision-filter or gravity hooks. Physical game validation pending.",config.armedFlightIdle,config.disableSprintWhenArmed);
+        SKSE::log::info("Ready. Armed idle={} DisableSprintWhenArmed={}. BFCO-independent. No attack, stamina-drain, collision-filter or gravity hooks.",config.armedFlightIdle,config.disableSprintWhenArmed);
         break;
     }
     default: break;
@@ -1433,7 +1561,7 @@ void message(SKSE::MessagingInterface::Message* message) {
 
 extern "C" __declspec(dllexport) constinit SKSE::PluginVersionData SKSEPlugin_Version = [] {
     SKSE::PluginVersionData version;
-    version.PluginVersion({0, 4, 1, 0}); version.PluginName("Wingflight"); version.AuthorName("ROSVER");
+    version.PluginVersion({0, 4, 5, 0}); version.PluginName("Wingflight"); version.AuthorName("ROSVER");
     // The generic-struct flag covers CommonLib's version-selected accessors;
     // the post-629-only bit is rejected by older SKSE loaders.
     version.UsesAddressLibrary(); version.UsesNoStructs();
@@ -1446,7 +1574,7 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Query(const SKSE::QueryInterfac
     if(!skse||!info)return false;
     info->infoVersion=SKSE::PluginInfo::kVersion;
     info->name="Wingflight";
-    info->version=REL::Version(0,4,1,0).pack();
+    info->version=REL::Version(0,4,5,0).pack();
     const auto version=skse->RuntimeVersion();
     return !skse->IsEditor()&&runtime::supported(runtime::selectSKSE(version[0],version[1],version[2],version[3]));
 }
@@ -1475,12 +1603,15 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Load(const SKSE::LoadInterface*
     SKSE::log::info("Flight poses revision=dynamic-leg-poses-1: configurable native flight transitions; BodyPose=1/2/3; INI schema migration; single OAR pose group and FAR fallback");
     SKSE::log::info("Flight steering revision=reverse-brake-1: near-opposite movement brakes through zero; body facing follows requested flight direction");
     SKSE::log::info("Flight leg handoff revision=weapon-transition-1: draw/sheath and pose recovery retain continuous lower-body coverage");
-    SKSE::log::info("AE16 compatibility TEST PATCH 1: runtime={} store={} structs={} bodyHook={}; older AE/GOG gameplay validation pending",
+    SKSE::log::info("Runtime compatibility: runtime={} store={} structs={} bodyHook={}",
         runtimeName(),runtime::gog(runtimeBackend())?"GOG":"Steam",runtime::before629(runtimeBackend())?"pre-629":"post-629",
         runtime::bodyCallsite(runtimeBackend())?"verified call-site chain":"resolved scene-entry chain");
     SKSE::log::info("Wingflight failure diagnostics revision=failure-details-1; existing guard decisions unchanged; repeated causes limited by context");
     try { config = wingflight::loadAndMigrateConfiguration(); }
-    catch (const std::exception& error) { SKSE::log::critical("Configuration error: {}", error.what()); return false; }
+    catch(const std::exception& error){
+        SKSE::log::error("Configuration startup failed: {}; using built-in defaults for this session; DLL loading continues",error.what());
+        config=Configuration{};
+    }
     logging::configure(config.logSamples);
     SKSE::log::info("Logging initialized: DetailedLogging={}; initialization, compatibility, warnings and errors always retained; revision=logging-9",config.logSamples);
     SKSE::log::info("Sprint wings revision=configurable-recovery-1: HighSpeedFlapHoldSeconds={:.2f}; entry reuses downswing only above estimated 70 percent raised height",config.highSpeedFlapHoldSeconds);
@@ -1493,6 +1624,8 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Load(const SKSE::LoadInterface*
         vm->RegisterFunction("IsEnabled", "WingflightNative", +[](RE::StaticFunctionTag*) -> bool { return ready.load(); });
         return true;
     });
-    SKSE::log::info("Wingflight 0.4.1 for Skyrim {}. {} adapters. FAR resource defaults and optional OAR flight poses; integrated and custom wing providers; optional Mod Control Panel. 1.7 gameplay validation pending.",runtimeName(),config.profiles.size());
-    return SKSE::GetMessagingInterface()->RegisterListener(message);
+    SKSE::log::info("Wingflight 0.4.5 for Skyrim {}. {} adapters. FAR resource defaults and optional OAR flight poses; integrated and custom wing providers; optional Mod Control Panel.",runtimeName(),config.profiles.size());
+    const bool listening=SKSE::GetMessagingInterface()->RegisterListener(message);
+    if(!listening)SKSE::log::critical("Wingflight cannot load: SKSE lifecycle listener registration failed");
+    return listening;
 }

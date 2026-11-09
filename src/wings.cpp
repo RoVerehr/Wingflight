@@ -1,3 +1,5 @@
+#include "wing_audio.hpp"
+#include "wing_models.hpp"
 #include "wings.hpp"
 #include "logging.hpp"
 #include "effect_owner.hpp"
@@ -31,16 +33,14 @@ void Wings::prepareContinuousAnimation(WingMatch match,bool active,bool highSpee
         if(match.profile->continuousFlight&&active&&registered_.prepare(match).found){registered_.blend(0,1,0);registered_.loopRate(highSpeed?fastMultiplier:1.f,1);}
         return;
     }
-    if(!active||!match.profile||!match.profile->continuousFlight||!wingEventActor(match.owner,match.effect)
-        ||!match.effect->hitEffects){clearContinuousBinding();return;}
+    if(!active||!match.profile||!match.profile->continuousFlight||!wingEventActor(match.owner,match.effect)){clearContinuousBinding();return;}
     std::array<RE::BSTSmartPointer<RE::BShkbAnimationGraph>,16> graphs;
     std::array<RE::NiPointer<RE::NiAVObject>,16> roots;
     unsigned count{};
     std::unordered_set<const RE::ModelReferenceEffect*> currentModels;
     const auto stateTable=REL::Relocation<std::uintptr_t>(RE::VTABLE_hkbStateMachine[0]).address();
-    for(auto effect:*match.effect->hitEffects) {
-        if(!effect||effect->finished||effect->GetType()!=RE::TEMP_EFFECT_TYPE::kRefModel)continue;
-        const auto model=static_cast<RE::ModelReferenceEffect*>(effect);
+    for(const auto& owned:wingModels(match)) {
+        const auto model=owned.get();
         if(!model->GetAttached()||!model->Get3D())continue;
         currentModels.insert(model);
         RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
@@ -132,9 +132,9 @@ WingPlayback Wings::prepareVisual(WingMatch match){
         // Fairy/Chaurus own their looping Havok animation. No clock, pose or
         // generated Ni interpolator is borrowed from that provider.
         WingPlayback out;
-        if(!wingEventActor(match.owner,match.effect)||!match.effect->hitEffects)return out;
-        for(auto effect:*match.effect->hitEffects)if(effect&&!effect->finished&&effect->GetType()==RE::TEMP_EFFECT_TYPE::kRefModel) {
-            const auto model=static_cast<RE::ModelReferenceEffect*>(effect);
+        if(!wingEventActor(match.owner,match.effect))return out;
+        for(const auto& owned:wingModels(match)) {
+            const auto model=owned.get();
             if(model->GetAttached()&&model->Get3D()){out.found=true;out.activeSequence="Provider-owned continuous loop";break;}
         }
         return out;
@@ -164,11 +164,25 @@ bool Wings::setJumpPreview(WingMatch match,float amount,float period,float ampli
     if(!match.profile||!match.profile->awuCompatibility||match.profile->nativeVampire||match.profile->continuousFlight||match.profile->animationless)return false;
     return prepareVisual(match).found&&runtime_.preview(amount,period,amplitude);
 }
+void Wings::playJumpOpeningSound(WingMatch match){
+    if(!match.profile||!match.profile->awuCompatibility||!wingSoundActor(match.owner,match.effect,false)
+        ||match.owner->AsActorState()->IsSwimming())return;
+    const auto found=sounds_.find(match.profile);
+    auto descriptor=found==sounds_.end()?nullptr:found->second;
+    if(!descriptor&&match.profile->flapSoundFiles.empty())return;
+    RE::BSSoundHandle handle;
+    const bool built=buildWingSound(handle,descriptor,match.profile->flapSoundFiles,0x1A2FF);
+    bool played=false;
+    if(built){handle.SetPosition(match.owner->GetPosition());if(auto node=match.owner->Get3D())handle.SetObjectToFollow(node);played=handle.Play();}
+    SKSE::log::debug("Jump wing opening sound: built={} played={}",built,played);
+    if(!built||!played)diagnostic::report(!built?"sound.handle-build-failed":"sound.play-failed","skip jump opening sound",match.owner,"jump-opening");
+}
 bool Wings::parkInvisibleGlide(){return registeredActive_?registered_.parkFast():logicalActive_?logical_.parkFast():nativeActive_?parkVampireFast():runtime_.parkFast();}
 void Wings::setFlapRate(float rate){if(registeredActive_)registered_.powerRate(rate);else if(logicalActive_)logical_.powerRate(rate);else if(nativeActive_)rateVampireWings(rate);else runtime_.powerRate(rate);}
 void Wings::updateGlideRate(float fast,float spread){if(registeredActive_)registered_.loopRate(fast,spread);else if(logicalActive_)logical_.loopRate(fast,spread);else if(nativeActive_)loopRateVampireWings(fast,spread);else runtime_.loopRate(fast,spread);}
 void Wings::updatePowerPitch(float degrees){if(registeredActive_){registered_.pitch(degrees);return;}if(logicalActive_)return;if(nativeActive_)pitchVampireWings(degrees);else runtime_.pitch(degrees);}
 void Wings::resolve(const Configuration& cfg) {
+    resetWingModelCache();
     loadWingRegistrations();
     effects_.clear();
     sounds_.clear();
@@ -202,17 +216,20 @@ void Wings::resolve(const Configuration& cfg) {
         if(!data->LookupLoadedModByName(profile.plugin) && !data->LookupLoadedLightModByName(profile.plugin)){
             SKSE::log::info("Optional wing adapter {} skipped: {} is not installed",profile.id,profile.plugin);continue;
         }
-        if(profile.flapSoundID) {
-            if(auto sound=data->LookupForm<RE::BGSSoundDescriptorForm>(profile.flapSoundID,profile.plugin)) {
+        const bool optionalSoundMissing=profile.soundPlugin!=profile.plugin
+            &&!data->LookupLoadedModByName(profile.soundPlugin)&&!data->LookupLoadedLightModByName(profile.soundPlugin);
+        if(optionalSoundMissing)SKSE::log::info("Optional sound provider {} absent for {}; wing audio disabled",profile.soundPlugin,profile.id);
+        if(profile.flapSoundID&&!optionalSoundMissing) {
+            if(auto sound=data->LookupForm<RE::BGSSoundDescriptorForm>(profile.flapSoundID,profile.soundPlugin)) {
                 sounds_.emplace(&profile,sound);
-            } else { SKSE::log::warn("Missing power-stroke sound {}:{:06X}",profile.plugin,profile.flapSoundID); }
+            } else { SKSE::log::warn("Missing power-stroke sound {}:{:06X}",profile.soundPlugin,profile.flapSoundID); }
         }
-        if(profile.fastSoundID) {
-            if(auto sound=data->LookupForm<RE::BGSSoundDescriptorForm>(profile.fastSoundID,profile.plugin))fastSounds_.emplace(&profile,sound);
+        if(profile.fastSoundID&&!optionalSoundMissing) {
+            if(auto sound=data->LookupForm<RE::BGSSoundDescriptorForm>(profile.fastSoundID,profile.soundPlugin))fastSounds_.emplace(&profile,sound);
             else SKSE::log::warn("Missing fast-flap sound {}:{:06X}",profile.plugin,profile.fastSoundID);
         }
-        if(profile.spreadSoundID&&profile.spreadSoundVolume>0) {
-            if(auto sound=data->LookupForm<RE::BGSSoundDescriptorForm>(profile.spreadSoundID,profile.plugin))spreadSounds_.emplace(&profile,sound);
+        if(profile.spreadSoundID&&profile.spreadSoundVolume>0&&!optionalSoundMissing) {
+            if(auto sound=data->LookupForm<RE::BGSSoundDescriptorForm>(profile.spreadSoundID,profile.soundPlugin))spreadSounds_.emplace(&profile,sound);
             else SKSE::log::warn("Missing flutter sound {}:{:06X}",profile.plugin,profile.spreadSoundID);
         }
         unsigned count = 0;
@@ -227,6 +244,13 @@ void Wings::resolve(const Configuration& cfg) {
     }
 }
 void Wings::updatePowerSound(WingMatch match,const WingPlayback& playback){
+    if(match.profile&&!match.profile->soundPlugin.empty()&&match.profile->soundPlugin!=match.profile->plugin
+        &&match.profile->flapSoundFiles.empty()&&match.profile->fastSoundFiles.empty()&&match.profile->spreadSoundFiles.empty()){
+        const auto data=RE::TESDataHandler::GetSingleton();
+        if(!data->LookupLoadedModByName(match.profile->soundPlugin)&&!data->LookupLoadedLightModByName(match.profile->soundPlugin)){
+            strokeSound_.reset();fastSound_.reset();flutterSound_.reset();return;
+        }
+    }
     if(registeredWing(match.profile)){
         auto resolve=[&](auto& map,std::uint32_t id){if(id&&!map.contains(match.profile))if(auto sound=RE::TESDataHandler::GetSingleton()->LookupForm<RE::BGSSoundDescriptorForm>(id,match.profile->soundPlugin))map.emplace(match.profile,sound);};
         resolve(sounds_,match.profile->flapSoundID);resolve(fastSounds_,match.profile->fastSoundID);resolve(spreadSounds_,match.profile->spreadSoundID);
@@ -241,32 +265,41 @@ void Wings::updatePowerSound(WingMatch match,const WingPlayback& playback){
         playback.glideWeight,playback.glideFrequency,profile.fastSoundPhase,1.0f);
     const bool flutter=flutterSound_.update(playback.found&&playback.spreadActive,playback.spreadPhase,
         playback.spreadWeight,playback.spreadFrequency,profile.spreadSoundPhase1,profile.spreadSoundPhase2);
-    auto play=[&](const auto& descriptors,const char* kind,float phase,float volume=1.0f){
-        const auto found=descriptors.find(match.profile);auto audio=RE::BSAudioManager::GetSingleton();
-        if(found==descriptors.end()||!audio){
-            // Sound ID/volume zero is an intentional mute, not a missing record.
+    auto play=[&](const auto& descriptors,const auto& files,const char* kind,float phase,std::uint32_t output,float volume=1.0f){
+        if(volume<=0)return;
+        const auto found=descriptors.find(match.profile);
+        auto descriptor=found==descriptors.end()?nullptr:found->second;
+        if(!descriptor&&files.empty()){
             const bool configured=std::string_view(kind)=="power-stroke"?profile.flapSoundID!=0
                 :std::string_view(kind)=="fast-flap"?profile.fastSoundID!=0:profile.spreadSoundID!=0&&profile.spreadSoundVolume>0;
-            if(configured)diagnostic::report(!audio?"sound.audio-manager-missing":"sound.descriptor-unresolved",
-                "skip sound playback",match.owner,kind);
-            return;}
-        RE::BSSoundHandle handle;const bool built=audio->GetSoundHandle(handle,found->second);bool played=false;
+            if(configured)diagnostic::report("sound.descriptor-unresolved","skip sound playback",match.owner,kind);
+            return;
+        }
+        RE::BSSoundHandle handle;const bool built=buildWingSound(handle,descriptor,files,output);bool played=false;
         if(built){handle.SetPosition(match.owner->GetPosition());if(auto node=match.owner->Get3D())handle.SetObjectToFollow(node);
             if(volume!=1.0f)handle.SetVolume(volume);played=handle.Play();}
-        SKSE::log::debug("Runtime {} sound: phase={:.4f} built={} played={} descriptor={:08X}",kind,phase,built,played,found->second->GetFormID());
-        if(!built||!played)diagnostic::report(!built?"sound.handle-build-failed":"sound.play-failed","skip this playback",match.owner,
-            fmt::format("kind={} descriptor={:08X}",kind,found->second->GetFormID()));
+        SKSE::log::debug("Runtime {} sound: phase={:.4f} built={} played={} source={} descriptor={:08X}",kind,phase,built,played,files.empty()?"descriptor":"file",descriptor?descriptor->GetFormID():0);
+        if(!built||!played)diagnostic::report(!built?"sound.handle-build-failed":"sound.play-failed","skip this playback",match.owner,kind);
     };
-    if(power)play(sounds_,"power-stroke",playback.phase);
-    if(fast)play(fastSounds_,"fast-flap",playback.glidePhase);
-    if(flutter)play(spreadSounds_,"flutter-glide",playback.spreadPhase,
+    if(power)play(sounds_,profile.flapSoundFiles,"power-stroke",playback.phase,0x1A2FF);
+    if(fast)play(fastSounds_,profile.fastSoundFiles,"fast-flap",playback.glidePhase,0x5A28A);
+    if(flutter)play(spreadSounds_,profile.spreadSoundFiles,"flutter-glide",playback.spreadPhase,0x5A28A,
         profile.spreadSoundVolume*std::clamp(playback.spreadWeight,0.0f,1.0f));
 }
-WingMatch Wings::find(RE::Actor* actor,bool ownedFlight) const {
+bool Wings::hasWingSource(RE::Actor* actor)const{
+    if(!actor)return false;
+    if(hasRegisteredWingSource(actor)||isNativeVampireLord(actor))return true;
+    if(const auto list=actor->AsMagicTarget()->GetActiveEffectList())for(const auto effect:*list)
+        if(effect&&effect->target==actor->AsMagicTarget()
+            &&!effect->flags.any(RE::ActiveEffect::Flag::kInactive,RE::ActiveEffect::Flag::kDispelled)
+            &&effects_.contains(effect->GetBaseObject()))return true;
+    return false;
+}
+WingMatch Wings::find(RE::Actor* actor,bool ownedFlight,bool appearanceOnly) const {
     if (!actor) { return {}; }
     // Body graph decides stance/events. A visible AWU ART is independent of
     // whether the player currently uses a VampireLord or Character body graph.
-    if(usesVampireLordBehavior(actor)){
+    if(!appearanceOnly&&usesVampireLordBehavior(actor)){
         bool stance{};
         if(!actor->GetGraphVariableBool("isLevitating",stance)||(!stance&&!ownedFlight))return {};
     }
@@ -279,20 +312,17 @@ WingMatch Wings::find(RE::Actor* actor,bool ownedFlight) const {
         if (found != effects_.end()) {
             // AWU's Jump input listener is player-only. NPCs use the same
             // visible-effect/provider binding without waiting for player input.
-            if(found->second->awuCompatibility && actor==RE::PlayerCharacter::GetSingleton() && !awuEffectReady(actor,effect))continue;
+            if(!appearanceOnly && found->second->awuCompatibility && actor==RE::PlayerCharacter::GetSingleton() && !awuEffectReady(actor,effect))continue;
             if(found->second->animationless) {
                 if(wingEventActor(actor,effect))invisible={found->second,effect,actor};
                 continue;
             }
-            if(!wingEventActor(actor,effect)||!effect->hitEffects)continue;
-            bool attached=false;
-            for(auto visual:*effect->hitEffects)if(visual&&!visual->finished&&visual->GetType()==RE::TEMP_EFFECT_TYPE::kRefModel){
-                const auto model=static_cast<RE::ModelReferenceEffect*>(visual);
-                if(model->GetAttached()&&model->Get3D()){attached=true;break;}}
+            if(!wingEventActor(actor,effect))continue;
+            const bool attached=!wingModels({found->second,effect,actor}).empty();
             if(attached){art={found->second,effect,actor};break;}
         }
     }
-    const bool skeletal=nativeVampireFlightEligible(actor,ownedFlight)&&vampireSceneReady();
+    const bool skeletal=appearanceOnly?nativeVampireAppearanceEligible(actor):(nativeVampireFlightEligible(actor,ownedFlight)&&vampireSceneReady());
     const auto requested=isNativeVampireLord(actor)?vampireWingDriver():vampire::Driver::automatic;
     const auto selected=vampire::chooseDriver(requested,
         art.profile!=nullptr,skeletal);
@@ -316,15 +346,13 @@ bool Wings::send(WingMatch match,const std::string& event)const{
     return const_cast<Wings*>(this)->prepareVisual(match).found;
 }
 void Wings::updateGroundRecovery(WingMatch match,float dt,bool grounded,bool fullFlight){
-    // Other wing providers keep their own behavior. Borrow only freshly validated
-    // player-owned art models; no object from an old effect/session is dereferenced.
-    if(!match.profile||!match.profile->awuCompatibility||match.profile->continuousFlight||!wingEventActor(match.owner,match.effect)
-        ||!match.effect->hitEffects){groundRecovery_.clear();return;}
+    // Borrow only validated wing ART models. Script-generated providers opt in
+    // through explicit ArtObjects; unrelated provider models are left alone.
+    if(!nativeWingControls(match.profile)||!wingEventActor(match.owner,match.effect)){groundRecovery_.clear();return;}
     std::unordered_set<const RE::ModelReferenceEffect*> current;
     const auto stateTable=REL::Relocation<std::uintptr_t>(RE::VTABLE_hkbStateMachine[0]).address();
-    for(auto effect:*match.effect->hitEffects){
-        if(!effect||effect->finished||effect->GetType()!=RE::TEMP_EFFECT_TYPE::kRefModel)continue;
-        auto* model=static_cast<RE::ModelReferenceEffect*>(effect);
+    for(const auto& owned:wingModels(match)){
+        auto* model=owned.get();
         if(!model->GetAttached())continue;
         current.insert(model);
         bool loop=false;
@@ -352,10 +380,11 @@ void Wings::updateGroundRecovery(WingMatch match,float dt,bool grounded,bool ful
         }
         if(groundRecovery_[model].update(dt,grounded,fullFlight,loop)){
             // Release the manager lock before NotifyAnimationGraph takes it again.
-            // MTState is an original AWU transition from jump flutter to folding.
+            // Keep AWU MTState; DAO-style graphs fold through JumpLandEnd.
             // Send to this wing ART only; never Actor::NotifyAnimationGraph.
-            const bool accepted=model->NotifyAnimationGraph("MTState");
-            SKSE::log::debug("AWU grounded wing recovery: replayed wing-only MTState accepted={} (physical support, flutter state8)",accepted);
+            const auto command=wingFoldEvent(match.profile);
+            const bool accepted=model->NotifyAnimationGraph(command);
+            SKSE::log::debug("Grounded wing recovery: wing-only {} accepted={} adapter={} (physical support, flutter state8)",command,accepted,match.profile->id);
         }
     }
     std::erase_if(groundRecovery_,[&](const auto& item){return !current.contains(item.first);});

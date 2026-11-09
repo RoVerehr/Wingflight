@@ -15,21 +15,23 @@ inline Mode savedMode(int value) { return value==1 || value==2 ? Mode::free : Mo
 inline constexpr float highSpeedHeightCorrectionSpeed=4.0f;
 struct Tuning {
     bool flapOnHighSpeedEntry{true};
-    bool endFlightOnGround{true};
+    bool allowOverencumberedFlight{false};
+    bool endFlightOnGround{false};
     bool groundWingIdle{false};
-    float groundHoverHeight{0.5f}; // Havok units above a retained floor.
-    float groundBeatDistance{0.5f}; // Havok units to the floor below for normal-speed ground beats.
-    float descentSpeed{3.f}; // Havok units/s the slowed ground beats aim to sink at.
-    float groundWingIdleSpeedPercent{75.f}; // Visual-only ground beats; manual beats keep full speed.
-    float speed{7.0f}, acceleration{4.0f}, drag{2.5f};
+    float groundHoverHeight{0.7f}; // Havok units above a retained floor.
+    float groundBeatDistance{0.7f}; // Havok units to the floor below for normal-speed ground beats.
+    float descentSpeed{3.f}; // Havok units/s for controlled wingbeat and Continuous descent.
+    float groundWingIdleSpeedPercent{100.f}; // Visual-only ground beats; manual beats keep full speed.
+    float speed{7.0f}, acceleration{4.0f}, drag{1.2f};
     float sprintSpeedMultiplier{1.50f};
     float turnResponse{12.0f};
-    float lift{4.5f}, maxRise{7.0f}, gravity{4.0f}, glideFall{2.0f};
-    float flapCooldown{0.25f};
-    float flapCost{0.0f}, sustainCost{0.0f};
+    float lift{5.5f}, maxRise{10.0f}, gravity{5.0f}, glideFall{3.0f};
+    float glideDeceleration{10.0f}; // Maximum reduction in falling speed per second.
+    float flapCooldown{0.5f};
+    float flapCost{20.0f}, sustainCost{0.0f};
     float flapSpeedMultiplier{1.15f}, maxFlapSpeedMultiplier{1.60f};
-    float flapSpeedHoldSeconds{0.80f}, flapSpeedFadeSeconds{1.50f};
-    float autoFlapImpulse{5.0f},autoFlapCost{};
+    float flapSpeedHoldSeconds{1.50f}, flapSpeedFadeSeconds{3.00f};
+    float autoFlapImpulse{6.5f},autoFlapCost{10.0f};
     float continuousRiseSpeed{4.0f};
 };
 struct Controls {
@@ -47,6 +49,9 @@ inline JumpPress classifyJumpPress(bool downEdge, bool alreadyHeld, bool airborn
 inline bool requestsTakeoff(const Controls& input, bool airborneNow) {
     return input.takeoff && airborneNow;
 }
+inline bool flightLoadAllowed(const Tuning& tuning,bool overencumbered) {
+    return tuning.allowOverencumberedFlight || !overencumbered;
+}
 inline bool claimJumpForFlight(bool flying, bool freshPress, bool airborne,
     bool hasWings, bool usableActor, bool hasGraph, bool hasStamina) {
     return flying || (freshPress && airborne && hasWings && usableActor && hasGraph && hasStamina);
@@ -60,6 +65,7 @@ struct Observation {
     bool wingBusy{};
     float reservedManualStamina{},reservedAutoStamina{};
     float groundDistance{INFINITY}; // Havok units down to the floor; infinity when no hit.
+    bool overencumbered{}; // Player's native IsOverEncumbered result.
 };
 struct Outcome { bool flapped{}, landed{}, aborted{}, released{}; float cost{}; bool highSpeedEntryFlap{},automaticFlapped{}; };
 
@@ -119,6 +125,12 @@ public:
     }
     Mode mode() const { return mode_; }
     Vec3 velocity() const { return velocity_; }
+    // Held glide keeps the engine's movement and gravity. Only arrest descent
+    // beyond its gradually tightening fall-speed envelope after native update.
+    Vec3 limitGlideVelocity(Vec3 native) const {
+        if(glideOnly())native.z=std::max(native.z,-glideFallLimit_);
+        return native;
+    }
     float speedMultiplier() const { return 1+speedBoost_; }
     float horizontalMultiplier(bool sprint, const Tuning& t) const {
         return (sprint?t.sprintSpeedMultiplier:1.0f)*speedMultiplier();
@@ -159,11 +171,14 @@ public:
         if (takeoff) { cooldown_ = t.flapCooldown; } // Lift waits for the visible downstroke.
         velocity_.z = std::clamp(velocity_.z, -t.glideFall, t.maxRise);
     }
-    void beginGlide(Vec3 velocity,const Tuning& t){begin(velocity,false,t);glideOnly_=true;}
+    void beginGlide(Vec3 velocity,const Tuning& t){
+        reset();active_=glideOnly_=true;velocity_=velocity;
+        glideFallLimit_=std::max(t.glideFall,-velocity.z);
+    }
     Outcome tick(float dt, Controls input, Observation observed, const Tuning& t) {
         Outcome result;
         if (!active_) { return result; }
-        if (!observed.eligible || !observed.validActor) {
+        if (!observed.eligible || !observed.validActor || !flightLoadAllowed(t,observed.overencumbered)) {
             reset(); result.aborted = true; return result;
         }
         // Manual exit immediately returns all motion/fall handling to Skyrim.
@@ -303,14 +318,19 @@ public:
                 reset();result.aborted=true;return result;
             }
             if(!hoverAnchor_){hoverHeight_=observed.height;hoverIntegral_=0;hoverAnchor_=true;}
-            const float climb=input.up?t.continuousRiseSpeed:input.down?-t.glideFall:0;
+            const float descent=std::clamp(t.descentSpeed,.5f,8.f);
+            const float climb=input.up?t.continuousRiseSpeed:input.down?-descent:0;
             if(input.up||input.down){hoverHeight_=observed.height;hoverIntegral_=0;}
             const float error=hoverHeight_-observed.height;
             hoverIntegral_=std::clamp(hoverIntegral_+6.0f*error*dt,-highSpeedHeightCorrectionSpeed,highSpeedHeightCorrectionSpeed);
             const float target=climb+4.0f*error+hoverIntegral_;
             velocity_.z=approach(velocity_.z,target,t.acceleration,dt);
-            velocity_.z=std::clamp(velocity_.z,-t.glideFall-highSpeedHeightCorrectionSpeed,t.continuousRiseSpeed+highSpeedHeightCorrectionSpeed);
-        } else if (glideOnly_ || (mode_ == Mode::flap && !highSpeed_&&!normalGroundHover_&&!controlledDescent_)) {
+            velocity_.z=std::clamp(velocity_.z,-descent-highSpeedHeightCorrectionSpeed,t.continuousRiseSpeed+highSpeedHeightCorrectionSpeed);
+        } else if(glideOnly_) {
+            const float change=t.glideDeceleration*dt;
+            glideFallLimit_+=std::clamp(t.glideFall-glideFallLimit_,-change,change);
+            velocity_.z=std::max(velocity_.z-t.gravity*dt,-glideFallLimit_);
+        } else if (mode_ == Mode::flap && !highSpeed_&&!normalGroundHover_&&!controlledDescent_) {
             velocity_.z = std::max(velocity_.z - t.gravity * dt, -t.glideFall);
         } else if(!highSpeed_) {
             if(!std::isfinite(observed.height)) {
@@ -432,6 +452,7 @@ private:
     float reversalHeading_{};
     Mode mode_{Mode::flap};
     Vec3 velocity_{};
+    float glideFallLimit_{};
     float cooldown_{}, age_{}, contact_{},groundIdleGrace_{};
     float speedBoost_{},boostHold_{},boostFadeAge_{},boostFadeStart_{};
     bool hoverAnchor_{};

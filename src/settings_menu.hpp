@@ -5,6 +5,7 @@
 
 namespace wingflight {
 using ApplyMenuSettings=std::function<std::string(const Configuration&)>;
-void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply);
+using ApplyWingAppearanceSettings=std::function<std::string(const std::string&,appearance::ProfileSettings)>;
+void registerSettingsMenu(const Configuration& initial,ApplyMenuSettings apply,ApplyWingAppearanceSettings appearance);
 bool settingsMenuOpen();
 }

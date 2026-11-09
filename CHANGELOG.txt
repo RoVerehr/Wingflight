@@ -1,3 +1,56 @@
+WingFlight 0.4.5
+Changes since the public 0.4.2 release.
+
+Wing appearance
+- Add a Wing Appearance page that shows the player's current wings and saves each wing style separately. Supports recognized AWU, registered custom and native Vampire Lord wings.
+- Set Normal size and Flying size independently, from 10% to 200%. Blend smoothly between them when entering or leaving flight or held-Jump glide.
+- Adjust Vertical offset from -60 to 60 Skyrim units, including moving wings toward the waist. Preserve the offset through AWU's shrinking/disappearing animation.
+- Save appearance in Wingflight/Appearance/Presets.ini using plugin/local-form identities, so load-order changes do not mix wing settings. NPC wings keep their original proportions.
+
+Follower wings
+- Add Give Wings to Wingless Followers and an AWU wing-style selector in NPC Flight. Disabled by default; AWU is required only for this optional feature.
+- Supply temporary wings only after the player enters full flight, only to active followers without equipped or active wing sources. Preserve their original equipment, spells and wing effects.
+- Let followers land before removing temporary wings when following or flight ends. Changing the selected style applies to newly supplied wings; airborne followers keep their current pair until landing.
+- Fix the temporary-wing creation crash and clean up WingFlight's own models when takeoff is cancelled or the session resets.
+
+SMP custom wings
+- Control detected SMP wing rigs after Faster HDT-SMP's update so physics does not overwrite the flight pose. Run this extra pass only for identified SMP wings with a verified update chain.
+- Increase the custom-wing limit from 128 to 512 controlled bones, supporting larger rigs such as GT Peacock Feather SMP Wings.
+- Fix native animation-controller callback argument forwarding, preventing crashes on affected update paths.
+
+Menus and scene transitions
+- Keep wingbeats, flight simulation and flight inputs active while the world is running, including Skyrim Souls RE's unpaused menus. Actual world pauses still stop flight updates.
+- Recognize the F1 panel's world freeze and prevent falling velocity from accumulating while it is open.
+- Preserve full flight through loading screens and scene changes, including entering and leaving interiors. Rebind the destination controller, retain the selected mode and reset stale movement/collision history without another takeoff cost.
+- Handle Worldspace Transition Tweaks' in-progress flag and temporary ground marker. Airborne save/load restoration is unchanged; scene-transition retention applies to full flight.
+
+Flight controls and physics
+- Add GlideDeceleration in the Flight panel. Held-Jump glide slows from the actual falling speed by a configurable amount per second, rather than within a fixed time; faster falls take longer to reach GlideFallSpeed.
+- Separate Continuous flight's held-Descend speed from outside-flight held-Jump glide. Fairy/Chaurus and custom Continuous wings use DescentSpeed for active descent and GlideFallSpeed for glide.
+- Add Allow Flight While Overencumbered, disabled by default. Native overencumbrance blocks takeoff and held-Jump glide; becoming overencumbered ends current flight through normal cleanup. Ordinary jumps and NPC flight are unchanged.
+- Fix fast-falling checks cancelling downward sprint flight, including True Directional Movement's sprint update. Preserve native sprint poses, stamina use and other sprint requirements; ordinary falling and unrelated checks are unchanged.
+
+Wing animations
+- Restore AWU's jump-opening flap sound when Control Jump Wing Animations handles an ordinary jump. Play it once per accepted visible opening, without adding a switch or repeating it during flutter.
+- Add Fold Wings While Sneaking in the Jump panel, disabled by default. Keep player AWU dragon/feather wings folded during grounded sneaking in either camera view; flight, jumping, gliding and swimming take priority.
+- Apply the optional fold when native sneak input is accepted, preventing a brief sneak-wing opening before folding. This option is independent of Control Jump Wing Animations.
+
+Wing providers and DAO2
+- Recognize explicitly configured, script-created wing ArtObjects outside the normal active-effect attachment list. Select the matching wing model instead of unrelated visual effects.
+- Support provider-specific landing/folding events, including DAO2 wings that could remain fluttering after retained ground flight ended.
+- Add PowerStrokeFiles, FastFlapFiles and SpreadFlutterFiles to provider/custom-wing INIs. Play the mod's existing sound files with normal wingbeat timing and positional audio, without extra sound records or an ESP.
+- Merge the DLL-side DAO2 compatibility support. Its separate preset can use DAO2's own animations and sounds without AWU; the optional flight-only aura-hiding script remains a separate download.
+
+Settings and updates
+- Align the shipped INI, embedded template and missing/invalid-value defaults while preserving valid saved preferences.
+- Save general preferences to Wingflight/Settings.ini, normally in MO2 Overwrite, instead of rewriting the installed Wingflight.ini. Import the existing installed INI on first startup; later mod updates preserve the independent player file.
+- Refresh the player file with new settings, renamed-key migrations and removal of retired keys, retaining recognized values and backing up migrated files. Keep appearance presets separate.
+- Recover invalid startup values with defaults while retaining valid settings. Log and skip malformed wing presets individually so one broken file does not reject the DLL or disable other presets. Preserve damaged originals; failed migration can continue with readable settings or defaults.
+- Keep strict validation and atomic saving for panel edits. Failed validation or saving retains the existing file.
+
+Updating DAO2 compatibility
+- Let WingFlight 0.4.5 overwrite any older Wingflight.dll supplied by the DAO2 compatibility package. Keep its compatibility preset and any desired optional aura-hiding script.
+
 Wingflight 0.4.2
 Changes since the public 0.4.1 release.
 

@@ -36,6 +36,7 @@ bool isNativeVampireLord(const RE::Actor*);
 void refreshVampireContext(RE::PlayerCharacter*);
 bool usesVampireLordBehavior(const RE::Actor*);
 vampire::Driver vampireWingDriver();
+bool nativeVampireAppearanceEligible(const RE::Actor* actor);
 bool nativeVampireFlightEligible(const RE::Actor*,bool ownedFlight=false);
 WingPlayback prepareVampireWings(RE::Actor*);
 void advanceVampireWings(float);

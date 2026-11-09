@@ -27,9 +27,84 @@ std::string numberText(float value) {
     if(error!=std::errc{})throw std::runtime_error("Cannot serialize a setting.");
     return {buffer,end};
 }
+struct IniSnapshot {
+    bool present{};
+    std::string bytes;
+    bool operator==(const IniSnapshot&) const = default;
+};
+IniSnapshot readIni(const std::filesystem::path& path) {
+    IniSnapshot snapshot{std::filesystem::exists(path),{}};
+    if(!snapshot.present)return snapshot;
+    if(std::filesystem::file_size(path)>1024*1024)throw std::runtime_error("Settings INI exceeds 1 MiB; original retained: "+path.string());
+    std::ifstream input(path,std::ios::binary);
+    if(!input)throw std::runtime_error("Cannot read settings INI; original retained: "+path.string());
+    snapshot.bytes.assign(std::istreambuf_iterator<char>(input),{});
+    if(input.bad())throw std::runtime_error("Cannot finish reading settings INI; original retained: "+path.string());
+    return snapshot;
+}
+std::string decodeIni(std::string text) {
+    if(!text.starts_with("\xFF\xFE"))return text;
+    if((text.size()-2)%2)throw std::runtime_error("Invalid UTF-16 settings INI; original retained.");
+    std::wstring wide((text.size()-2)/2,L'\0');
+    if(wide.empty())return {};
+    std::memcpy(wide.data(),text.data()+2,text.size()-2);
+    const int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide.data(),static_cast<int>(wide.size()),nullptr,0,nullptr,nullptr);
+    if(size<=0)throw std::runtime_error("Cannot decode UTF-16 settings INI; original retained.");
+    text.resize(size);WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide.data(),static_cast<int>(wide.size()),text.data(),size,nullptr,nullptr);
+    return text;
+}
+void retainBackup(const std::filesystem::path& path,const IniSnapshot& original) {
+    std::uint64_t hash=14695981039346656037ULL;
+    for(unsigned char c:original.bytes){hash^=c;hash*=1099511628211ULL;}
+    std::ostringstream suffix;suffix<<".pre-migration-"<<std::hex<<hash<<".bak";
+    auto backup=path;backup+=suffix.str();
+    if(!CopyFileW(path.c_str(),backup.c_str(),TRUE)){
+        const auto error=GetLastError();
+        if(error!=ERROR_FILE_EXISTS||readIni(backup)!=original)
+            throw std::system_error(error,std::system_category(),"Cannot preserve settings backup; original retained");
+    }
+}
+// Validate before replacing, detect external changes and never replace an
+// existing temporary file. Startup and menu commits share the same transaction.
+Configuration replaceIni(const std::filesystem::path& path,const IniSnapshot& original,
+    const std::string& updated,bool migration,const std::filesystem::path& importedFrom={},const IniSnapshot& imported={},bool* recoveredSettings=nullptr) {
+    const auto parse=[&](const std::filesystem::path& source,bool& recovered){
+        auto result=loadConfiguration(source,{.recoverInvalidSettings=migration,.recoveredSettings=&recovered});
+        if(recoveredSettings)*recoveredSettings=recovered;
+        return result;
+    };
+    bool recovered{};
+    if(original.present&&updated==original.bytes)return parse(path,recovered);
+    std::filesystem::create_directories(path.parent_path());
+    auto temporary=path;temporary+=(migration?L".migration.tmp":L".menu.tmp");
+    HANDLE file=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE)throw std::system_error(GetLastError(),std::system_category(),"Cannot create settings temporary file; original retained");
+    DWORD written{};
+    const bool ok=updated.size()<=MAXDWORD&&WriteFile(file,updated.data(),static_cast<DWORD>(updated.size()),&written,nullptr)
+        &&written==updated.size()&&FlushFileBuffers(file);
+    const auto error=ok?ERROR_SUCCESS:GetLastError();CloseHandle(file);
+    try{
+        if(!ok)throw std::system_error(error,std::system_category(),"Cannot write settings temporary file");
+        WritePrivateProfileStringW(nullptr,nullptr,nullptr,temporary.c_str());
+        auto configuration=parse(temporary,recovered);
+        if(recovered){
+            DeleteFileW(temporary.c_str());
+            SKSE::log::error("Player settings migration skipped: file={}; invalid settings ignored in memory, original file retained",importedFrom.empty()?path.string():importedFrom.string());
+            return configuration;
+        }
+        if(readIni(path)!=original)throw std::runtime_error("Settings INI changed while saving; current file retained.");
+        if(!importedFrom.empty()&&readIni(importedFrom)!=imported)
+            throw std::runtime_error("Legacy INI changed while importing; current file retained.");
+        if(migration&&original.present)retainBackup(path,original);
+        if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+            throw std::system_error(GetLastError(),std::system_category(),"Cannot replace settings INI; original retained");
+        WritePrivateProfileStringW(nullptr,nullptr,nullptr,path.c_str());
+        return configuration;
+    }catch(...){DeleteFileW(temporary.c_str());throw;}
+}
 }
 std::string migrateSettingsText(std::string_view original) {
-    if(original.size()>1024*1024)throw std::runtime_error("Wingflight.ini exceeds the 1 MiB migration limit; original retained.");
+    if(original.size()>1024*1024)throw std::runtime_error("Settings INI exceeds the 1 MiB migration limit; original retained.");
     using Values=std::map<std::pair<std::string,std::string>,std::string>;
     const auto parse=[](std::string_view text){
         Values values;std::string section,line;std::istringstream input{std::string(text)};
@@ -80,65 +155,31 @@ std::string migrateSettingsText(std::string_view original) {
     return output;
 }
 
+std::filesystem::path userSettingsPath() {
+    return std::filesystem::absolute("Data/SKSE/Plugins/Wingflight/Settings.ini");
+}
 Configuration loadAndMigrateConfiguration() {
-    const auto path=std::filesystem::absolute("Data/SKSE/Plugins/Wingflight.ini");
-    const bool present=std::filesystem::exists(path);
-    std::string original;
-    if(present){
-        if(std::filesystem::file_size(path)>1024*1024)throw std::runtime_error("Wingflight.ini exceeds 1 MiB; original retained.");
-        std::ifstream input(path,std::ios::binary);
-        if(!input)throw std::runtime_error("Cannot read Wingflight.ini; original retained.");
-        original.assign(std::istreambuf_iterator<char>(input),{});
-        if(input.bad())throw std::runtime_error("Cannot finish reading Wingflight.ini; original retained.");
-    }
-    std::string decoded=original;
-    if(decoded.starts_with("\xFF\xFE")){
-        if((decoded.size()-2)%2)throw std::runtime_error("Invalid UTF-16 INI; original retained.");
-        std::wstring wide((decoded.size()-2)/2,L'\0');
-        std::memcpy(wide.data(),decoded.data()+2,decoded.size()-2);
-        const int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide.data(),static_cast<int>(wide.size()),nullptr,0,nullptr,nullptr);
-        if(size<=0)throw std::runtime_error("Cannot decode UTF-16 INI; original retained.");
-        decoded.resize(size);WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide.data(),static_cast<int>(wide.size()),decoded.data(),size,nullptr,nullptr);
-    }
-    const auto updated=migrateSettingsText(decoded);
-    if(updated==original)return loadConfiguration();
-    std::filesystem::create_directories(path.parent_path());
-    auto temporary=path;temporary+=L".migration.tmp";
-    HANDLE file=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if(file==INVALID_HANDLE_VALUE)throw std::system_error(GetLastError(),std::system_category(),"Cannot create INI migration temporary file; original retained");
-    DWORD written{};
-    const bool writtenOK=WriteFile(file,updated.data(),static_cast<DWORD>(updated.size()),&written,nullptr)&&written==updated.size()&&FlushFileBuffers(file);
-    const auto writeError=writtenOK?ERROR_SUCCESS:GetLastError();CloseHandle(file);
+    const auto path=userSettingsPath();
+    auto selected=path;
+    bool parsedSource{};
     try{
-        if(!writtenOK)throw std::system_error(writeError,std::system_category(),"Cannot write migrated INI");
-        WritePrivateProfileStringW(nullptr,nullptr,nullptr,temporary.c_str());
-        // Validate the complete candidate with the same parser used at startup.
-        // Invalid values or bindings leave both the live INI and its bytes intact.
-        auto configuration=loadConfiguration(temporary);
-        std::filesystem::path backup;
-        if(present){
-            std::ifstream current(path,std::ios::binary);
-            const std::string currentBytes((std::istreambuf_iterator<char>(current)),{});
-            if(!current||currentBytes!=original)throw std::runtime_error("Wingflight.ini changed during migration; current file retained.");
-            current.close();
-            std::uint64_t hash=14695981039346656037ULL;
-            for(unsigned char c:original){hash^=c;hash*=1099511628211ULL;}
-            std::ostringstream suffix;suffix<<".pre-migration-"<<std::hex<<hash<<".bak";
-            backup=path;backup+=suffix.str();
-            if(!CopyFileW(path.c_str(),backup.c_str(),TRUE)){
-                const auto error=GetLastError();
-                std::ifstream saved(backup,std::ios::binary);
-                const std::string bytes((std::istreambuf_iterator<char>(saved)),{});
-                if(error!=ERROR_FILE_EXISTS||!saved||bytes!=original)
-                    throw std::system_error(error,std::system_category(),"Cannot preserve old INI backup; original retained");
-            }
-        }
-        if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-            throw std::system_error(GetLastError(),std::system_category(),"Cannot replace Wingflight.ini; original retained");
-        WritePrivateProfileStringW(nullptr,nullptr,nullptr,path.c_str());
-        SKSE::log::info("Wingflight.ini migrated to schema 0.4.2-13: recognized values preserved, obsolete keys removed, current comments installed; backup={}",backup.empty()?"none (new INI)":backup.string());
+        const auto original=readIni(path);
+        // The main INI is an import source only. Never replace saved user values
+        // with the shipped INI after a damaged or unwritable user file is found.
+        const auto legacy=original.present?std::filesystem::path{}:std::filesystem::absolute("Data/SKSE/Plugins/Wingflight.ini");
+        if(!original.present)selected=legacy;
+        const auto source=original.present?original:readIni(legacy);
+        const auto updated=migrateSettingsText(decodeIni(source.bytes));
+        parsedSource=true;
+        bool recovered{};
+        auto configuration=replaceIni(path,original,updated,true,legacy,source,&recovered);
+        if(!recovered&&(!original.present||updated!=original.bytes))
+            SKSE::log::info("Player settings schema 0.4.5-2: path={} imported={} recognized values preserved, missing keys added, obsolete keys removed",path.string(),!original.present);
         return configuration;
-    }catch(...){DeleteFileW(temporary.c_str());throw;}
+    }catch(const std::exception& error){
+        SKSE::log::error("Player settings startup error: file={} reason={}; {} in memory, original files retained; DLL loading continues",selected.string(),error.what(),parsedSource?"using readable settings":"using defaults");
+        return loadConfiguration(selected,{.useDefaults=!parsedSource,.recoverInvalidSettings=true});
+    }
 }
 
 std::string updateLiveSettingsText(std::string_view original, Configuration settings) {
@@ -147,12 +188,18 @@ std::string updateLiveSettingsText(std::string_view original, Configuration sett
     for(const auto& setting:liveFloatSettings)
         values[normalized(setting.section)][normalized(setting.key)]=numberText(setting.value(settings));
     values["flight"]["disablesprintwhenarmed"]=settings.disableSprintWhenArmed?"1":"0";
+    values["flight"]["allowoverencumberedflight"]=settings.tuning.allowOverencumberedFlight?"1":"0";
     values["flight"]["endflightonground"]=settings.tuning.endFlightOnGround?"1":"0";
     values["flight"]["groundwingidle"]=settings.tuning.groundWingIdle?"1":"0";
     values["npcflight"]["enabled"]=settings.actors.enabled?"1":"0";
     values["npcflight"]["aircombat"]=settings.actors.airCombat?"1":"0";
+    values["npcflight"]["autowings"]=settings.actors.autoWings?"1":"0";
+    char effectText[8];const auto [effectEnd,effectError]=std::to_chars(effectText,effectText+sizeof(effectText),settings.actors.autoWingsEffect,16);
+    if(effectError!=std::errc{}||effectEnd-effectText>6)throw std::runtime_error("Cannot serialize temporary AWU wing choice.");
+    values["npcflight"]["autowingseffect"]=std::string(6-(effectEnd-effectText),'0')+std::string(effectText,effectEnd);
     values["general"]["detailedlogging"]=settings.logSamples?"1":"0";
     values["jump"]["controlwinganimations"]=settings.controlJumpWingAnimations?"1":"0";
+    values["jump"]["foldwingswhilesneaking"]=settings.foldWingsWhileSneaking?"1":"0";
     values["collision"]["enabled"]=settings.collision.enabled?"1":"0";
     values["collision"]["damageactors"]=settings.collision.damageActors?"1":"0";
     values["lowerbody"]["relaxedarmedlegs"]=settings.legRelaxation.enabled?"1":"0";
@@ -185,7 +232,7 @@ std::string updateLiveSettingsText(std::string_view original, Configuration sett
             const auto close=trimmed.find(']');
             if(close!=trimmed.npos) {
                 appendMissing();section=normalized(std::string_view(trimmed).substr(1,close-1));
-                if(values.contains(section)&&seenSections[section])throw std::runtime_error("Duplicate menu section in Wingflight.ini.");
+                if(values.contains(section)&&seenSections[section])throw std::runtime_error("Duplicate menu section in settings INI.");
                 seenSections[section]=true;
             }
         } else if(!trimmed.empty()&&!trimmed.starts_with(';')&&!trimmed.starts_with('#')&&values.contains(section)) {
@@ -198,7 +245,7 @@ std::string updateLiveSettingsText(std::string_view original, Configuration sett
                     begin=end;continue;
                 }
                 if(values.at(section).contains(key)) {
-                    if(seenKeys[section][key])throw std::runtime_error("Duplicate menu setting in Wingflight.ini.");
+                    if(seenKeys[section][key])throw std::runtime_error("Duplicate menu setting in settings INI.");
                     seenKeys[section][key]=true;
                     output+=std::string(line.substr(0,equals+1))+values.at(section).at(key);
                     const auto comment=content.find_first_of(";#",equals+1);
@@ -223,28 +270,18 @@ std::string updateLiveSettingsText(std::string_view original, Configuration sett
 }
 
 void saveLiveSettings(const std::filesystem::path& path,const Configuration& settings) {
-    std::ifstream input(path,std::ios::binary);
-    if(!input)throw std::runtime_error("Cannot read Wingflight.ini; no changes were applied.");
-    const std::string original((std::istreambuf_iterator<char>(input)),{});
-    if(input.bad())throw std::runtime_error("Cannot finish reading Wingflight.ini.");
-    input.close();
-    const auto updated=updateLiveSettingsText(original,settings);
-    if(updated==original)return;
-    // Same-directory temporary file keeps replacement atomic on the target volume.
-    // MO2 may put writes in Overwrite; the menu reports failures without applying.
-    auto temporary=path;temporary+=L".menu.tmp";
-    HANDLE file=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-    if(file==INVALID_HANDLE_VALUE)throw std::system_error(GetLastError(),std::system_category(),"Cannot create settings temporary file");
-    DWORD written{};
-    const bool success=updated.size()<=MAXDWORD && WriteFile(file,updated.data(),static_cast<DWORD>(updated.size()),&written,nullptr)
-        && written==updated.size() && FlushFileBuffers(file);
-    const auto error=success?ERROR_SUCCESS:GetLastError();CloseHandle(file);
-    if(!success) {DeleteFileW(temporary.c_str());throw std::system_error(error,std::system_category(),"Cannot write settings temporary file");}
-    if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
-        const auto moveError=GetLastError();DeleteFileW(temporary.c_str());
-        throw std::system_error(moveError,std::system_category(),"Cannot replace Wingflight.ini");
-    }
-    // Invalidate Windows profile API caches after replacing the INI.
-    WritePrivateProfileStringW(nullptr,nullptr,nullptr,path.c_str());
+    const auto original=readIni(path);
+    if(!original.present)throw std::runtime_error("Cannot read settings INI; no changes were applied.");
+    replaceIni(path,original,updateLiveSettingsText(decodeIni(original.bytes),settings),false);
+}
+void saveUserSettings(const Configuration& settings) {
+    if(const auto error=validateLiveSettings(settings);!error.empty())throw std::runtime_error(error);
+    const auto path=userSettingsPath();
+    const auto original=readIni(path);
+    const auto legacy=original.present?std::filesystem::path{}:std::filesystem::absolute("Data/SKSE/Plugins/Wingflight.ini");
+    const auto source=original.present?original:readIni(legacy);
+    const auto current=migrateSettingsText(decodeIni(source.bytes));
+    const auto updated=migrateSettingsText(updateLiveSettingsText(current,settings));
+    replaceIni(path,original,updated,false,legacy,source);
 }
 }

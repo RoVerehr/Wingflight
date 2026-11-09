@@ -1,3 +1,4 @@
+#include "wing_audio_files.hpp"
 #include "wing_registration_file.hpp"
 #include "wing_model_names.hpp"
 #include <Windows.h>
@@ -148,6 +149,9 @@ WingProfile readWingRegistration(const std::filesystem::path& file){
     channel::setAxisAngles(q,value(path,"Animation","AxisHeadingDegrees",0),value(path,"Animation","AxisTiltDegrees",0));
     if(!channel::valid(q))throw std::runtime_error("Wing animation values are outside their supported ranges; axis must be nonzero");
     p.soundPlugin=loadName(read(path,"Sound","Plugin","Dawnguard.esm"));
+    p.flapSoundFiles=wingSoundFiles(loadName(read(path,"Sound","PowerStrokeFiles")));
+    p.fastSoundFiles=wingSoundFiles(loadName(read(path,"Sound","FastFlapFiles")));
+    p.spreadSoundFiles=wingSoundFiles(loadName(read(path,"Sound","SpreadFlutterFiles")));
     auto soundID=[&](const char* key,const char* fallback){const auto text=read(path,"Sound",key,fallback);
         if(text=="000000"||text=="0")return 0u;const auto list=ids(text);
         if(list.size()!=1)throw std::runtime_error("Sound IDs must contain one FormID or 000000");return list.front();};
@@ -201,6 +205,9 @@ std::string wingRegistrationText(const WingProfile& p){
     out<<std::uppercase<<std::hex<<std::setw(6)<<std::setfill('0')<<p.flapSoundID<<"\nFastFlap="<<std::setw(6)<<p.fastSoundID
        <<"\nSpreadFlutter="<<std::setw(6)<<p.spreadSoundID<<std::dec<<"\nMarkerPhase="<<p.flapSoundPhase<<"\nFastMarkerPhase="<<p.fastSoundPhase
        <<"\nSpreadMarkerPhase1="<<p.spreadSoundPhase1<<"\nSpreadMarkerPhase2="<<p.spreadSoundPhase2<<"\nSpreadVolume="<<p.spreadSoundVolume<<"\n";
+    if(!p.flapSoundFiles.empty())out<<"PowerStrokeFiles="<<storeName(wingSoundFileList(p.flapSoundFiles))<<'\n';
+    if(!p.fastSoundFiles.empty())out<<"FastFlapFiles="<<storeName(wingSoundFileList(p.fastSoundFiles))<<'\n';
+    if(!p.spreadSoundFiles.empty())out<<"SpreadFlutterFiles="<<storeName(wingSoundFileList(p.spreadSoundFiles))<<'\n';
     return out.str();
 }
 }

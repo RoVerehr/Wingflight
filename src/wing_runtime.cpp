@@ -1,3 +1,5 @@
+#include "wing_models.hpp"
+#include "wing_appearance.hpp"
 #include "wing_runtime.hpp"
 #include "logging.hpp"
 #include "wing_runtime_policy.hpp"
@@ -123,6 +125,7 @@ void angleOverlay(State& s){
 struct ControllerUpdate {
     // Verified1.6.1170 D98C60 consumes RDX->time, NOT XMM1 float.
     static void thunk(RE::NiMultiTargetTransformController* self,RE::NiUpdateData* data){
+        WingAppearancePass appearance(netimmerse_cast<RE::NiAVObject*>(self->target),data);
         original(self,data);
         std::shared_ptr<State> s;{
             std::lock_guard guard(registryMutex);auto it=controllers.find(self);if(it==controllers.end())return;s=it->second;
@@ -261,15 +264,15 @@ void WingRuntime::advance(float dt){
     }if(expired)unregisterState(s);}
 }
 WingPlayback WingRuntime::prepare(WingMatch match){
-    WingPlayback out;if(!impl_->installed||!match.effect||!match.effect->hitEffects){
+    WingAppearancePass appearance(match.owner?match.owner->Get3D(false):nullptr);
+    WingPlayback out;if(!impl_->installed||(!match.effect&&!match.runtimeArt)){
         if(match.effect&&match.profile)diagnostic::report(!impl_->installed?"binding.driver-not-installed":"binding.hit-effects-unavailable",
             "return unavailable visual binding",match.effect,match.profile->id);
         return out;}
     unsigned modelCount{},attachedCount{},rootCount{};
-    for(auto effect:*match.effect->hitEffects){
-        if(!effect||effect->finished||effect->GetType()!=RE::TEMP_EFFECT_TYPE::kRefModel)continue;
+    for(const auto& owned:wingModels(match)){
         ++modelCount;
-        auto model=static_cast<RE::ModelReferenceEffect*>(effect);if(!model->GetAttached())continue;
+        auto model=owned.get();if(!model->GetAttached())continue;
         ++attachedCount;
         auto root=model->Get3D();if(!root){
             diagnostic::report("binding.model-root-unavailable","skip wing model",model,match.profile->id);continue;}

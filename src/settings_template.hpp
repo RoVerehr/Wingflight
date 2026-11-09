@@ -1,11 +1,25 @@
 #pragma once
 #include <string_view>
 namespace wingflight {
-inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.4.2-13. Startup updates this layout and comments.
-; Recognized settings are retained; replaced INIs are backed up beside this file.
+inline constexpr std::string_view settingsTemplate = R"WF_INI(; Wingflight configuration schema 0.4.5-2.
+; Player settings: Data/SKSE/Plugins/Wingflight/Settings.ini (normally MO2 Overwrite).
+; First startup imports Wingflight.ini; later startups use only the player file.
+; Startup preserves recognized values, adds new keys and removes obsolete keys.
+; Migrated player files are backed up beside Settings.ini; the shipped INI is unchanged.
 ; Mod Control Panel: Flight, NPC Flight, FreeFlight, Stamina, Jump, Lower Body tuning and controls apply/save live.
 ; Other settings remain startup-only. External INI edits still require a restart.
 ; Wingflight: original provider wings are sampled and blended at runtime.
+[WingAppearance]
+; Legacy defaults for wings without individual appearance settings.
+; Wing Appearance now edits only the current equipped/summoned wings.
+; Individual NormalScalePercent, FlightScalePercent and VerticalOffset values
+; are saved in Wingflight/Appearance/Presets.ini, keyed by plugin/local FormID.
+; This legacy size initializes BOTH size modes (10..200%).
+ScalePercent=100
+; Torso-local Skyrim units (-60..60). Negative moves toward the waist.
+; Legacy initial height for unconfigured wings. 0 is the original height.
+VerticalOffset=0
+
 [General]
 Enabled=1
 ; Apply/save live in Mod Control Panel / Logging. Off by default.
@@ -27,11 +41,19 @@ Enabled=1
 ; Fleeing or unresolved target/equipment falls back to safe ground combat.
 ; After combat: resume following if the player is flying, otherwise land.
 AirCombat=1
+; Give wingless followers temporary AWU wings only while the player is in full flight.
+; Requires installed AWU and its wing provider; existing supported wings take priority.
+; No equipment or permanent abilities are added. Followers land before removal.
+; Apply/save live. Default off.
+AutoWings=0
+; AWU local magic-effect ID (hex), selected by the AWU wing style menu.
+; Existing airborne followers retain their current pair until landing.
+AutoWingsEffect=00089A
 ; Maximum simultaneous NPC flight contexts (1..64); startup-only, not a recruitment limit.
 MaxActors=32
 ; Distance behind the player's current position, in Skyrim units (70..2000).
 ; Apply/save live. No recorded routes. Later rows stay farther behind; collisions remain enabled.
-FollowDistance=200.00
+FollowDistance=500.00
 
 [Keyboard]
 ; DirectInput scan codes. Jump follows Skyrim's remapped Jump control.
@@ -54,27 +76,32 @@ Descend=0
 Deadzone=0.2
 
 [Flight]
-; Apply/save live. 1: normal ground contact ends full flight (default).
-; 0: retain flight on the ground; Jump lifts off again, Exit Flight releases it.
+; Apply/save live. Default off: native overencumbrance blocks takeoff and held-Jump glide.
+; Becoming overencumbered during flight/glide ends it through normal cleanup.
+; 1 restores flight while overencumbered. Player only; ordinary jumps are unchanged.
+AllowOverencumberedFlight=0
+; Apply/save live. 1: normal ground contact ends full flight.
+; 0 (default): retain flight on the ground; Jump lifts off again, Exit Flight releases it.
 ; GroundWingIdle chooses how retained flight behaves. Held-Jump glide still lands normally.
 ; Damaging collisions and other flight interruptions still end flight.
-EndFlightOnGround=1
+EndFlightOnGround=0
 ; Only when EndFlightOnGround=0. Apply/save live in the Flight panel.
 ; 0: normal flight; both K modes keep continuous low wingbeats after ground contact.
 ; Farther than GroundBeatDistance from the floor below, beat speed adjusts to sink at DescentSpeed; Jump restores normal flight.
 ; 1: grounded visual wingbeats without automatic lift/cost; Space provides takeoff lift.
 GroundWingIdle=0
 ; GroundWingIdle=0 only. Havok units (1 = about 70 Skyrim units), 0.1..3. Space keeps full lift.
-GroundHoverHeight=0.50
+GroundHoverHeight=0.70
 ; GroundWingIdle=0 only. Floor distance below (vertical ray) for normal-speed ground beats, Havok units 0.1..3.
-GroundBeatDistance=0.50
-; Shared target sink speed: manual flight, Free Flight held Descend, and Normal ground descent.
-; Havok units/s 0.5..8. Physical wingbeats adjust speed; manual Space keeps full strength.
+GroundBeatDistance=0.70
+; Shared target sink speed: manual wingbeats, held Descend in Free/Continuous flight, and Normal ground descent.
+; Havok units/s 0.5..8. Continuous flight uses this directly; physical wingbeats adjust speed.
+; Manual Space keeps full strength. Outside-flight held-Jump glide uses GlideFallSpeed instead.
 ; Beats swing the speed slightly around the target; near 8 a swing can pass Collision/MinImpactSpeed and cause damage.
 DescentSpeed=3.00
 ; GroundWingIdle=1 only. Visual wingbeat speed, 10..200 percent; 75 is 25% slower, 200 is double speed.
 ; Manual Jump wingbeats keep normal speed. Apply/save live in the Flight panel.
-GroundWingIdleSpeedPercent=75.00
+GroundWingIdleSpeedPercent=100.00
 ; Controller velocity units (Havok); tune in game after basic collision tests.
 Speed=7.00
 ; Native actor sprint state selects this horizontal multiplier in all flight modes.
@@ -93,8 +120,13 @@ FlapImpulse=5.50
 MaxRise=10.00
 ; Shared simulated downward acceleration (Havok units/s^2) in both flight modes.
 Gravity=5.00
-; Glide speed limit without automatic wingbeat stamina, outside-flight held Jump, and Continuous flight descent.
+; Glide speed limit without automatic wingbeat stamina and for outside-flight held Jump.
+; Continuous flight's held Descend uses DescentSpeed instead.
 GlideFallSpeed=3.00
+; Maximum reduction of falling speed per second on entering held-Jump glide (0.1..30).
+; Havok velocity units/s per second. Lower brakes more gently; faster falls take longer.
+; GlideFallSpeed remains the final speed. Full-flight Descend is unchanged.
+GlideDeceleration=10.00
 FlapCooldown=0.50
 ; Actual sprint state + movement: each accepted flap adds this excess over 1x.
 ; 1.15 adds 0.15 to the separate flap multiplier per beat; 1 disables this bonus.
@@ -245,22 +277,25 @@ R"WF_INI([Jump]
 ; While swimming, block wing jump-opening events only; normal ascent and swimming animations remain native.
 ; Sneaking, weapon draw and casting remain native. Live in the Jump panel.
 ControlWingAnimations=1
+; Fold player AWU dragon/feather wings during grounded sneaking, in either camera view.
+; Independent of ControlWingAnimations. Airborne motion, flight and swimming take priority.
+FoldWingsWhileSneaking=0
 ; AWU dragon/feather wing opening during ordinary jumps (0..100 percent).
 ; 0 = folded, 30 = subtle opening, 100 = fully spread. Live in Mod Control Panel / Jump.
 ; Final opening after the initial OverOpenPercent pose; small continuous motion remains.
 ; Does not change flight/glide wing control, lift or jump height.
-WingOpenPercent=30.00
+WingOpenPercent=15.00
 ; Initial opening (0..100), independently set. 100 = fully open before settling.
 ; Example: OverOpenPercent=100 and WingOpenPercent=20 opens fully, then settles to 20.
 ; Set both percentages equal to remove the return motion.
-OverOpenPercent=35.00
+OverOpenPercent=30.00
 ; Seconds to open to the peak, also used to fold on landing (0.05..3).
-WingOpenSeconds=0.22
+WingOpenSeconds=0.40
 ; Seconds to transition from OverOpenPercent to WingOpenPercent (0.05..3).
-WingSettleSeconds=0.43
+WingSettleSeconds=1.00
 ; Seconds per jump flutter cycle; smaller is faster (0.2..5).
 ; Same original spread/flutter loop as glide, with independent timing and amplitude.
-WingFlutterPeriod=1.60
+WingFlutterPeriod=1.00
 ; Jump-only flutter amplitude (0..2): 0 = still, 1 = original, 2 = double.
 ; NOT multiplied by Wings/SpreadAmplitudeMultiplier. Partial WingOpenPercent still blends the motion with folded wings.
 WingFlutterAmplitude=1.00
@@ -290,9 +325,9 @@ SecondaryMotion=1
 ; Maximum added knee hinge rotation around the flight reference, degrees (0..30). 0 disables swing.
 ; This is a limit, not constant swing. Motion settles during steady flight.
 ; Feet inherit the calf and receive a small ankle correction. No sideways knee bending.
-SwingMaxDegrees=20.00
+SwingMaxDegrees=30.00
 ; Restoring spring strength (1..100): larger values return to the target more firmly/quickly.
-SwingStiffness=10.00
+SwingStiffness=3.00
 ; Angular damping (0..40): larger values reduce wobble; 0 allows continued oscillation.
 SwingDamping=5.00
 ; Acceleration/body-rotation influence (0..3): larger values make swing more noticeable.
